@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<body>
+<div id="output"></div>
+<script>
+const output = document.getElementById('output');
+fetch('http://127.0.0.1:8000/chat/stream', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: 'MCP 是什么？'})
+}).then(response => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    function read() {
+        reader.read().then(({done, value}) => {
+            if (done) return;
+            const text = decoder.decode(value);
+            // 解析 SSE
+            text.split('\n').forEach(line => {
+                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                    const data = JSON.parse(line.slice(6));
+                    output.innerText += data.text;
+                }
+            });
+            read();
+        });
+    }
+    read();
+});
+</script>
+</body>
+</html>

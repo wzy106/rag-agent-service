@@ -1,0 +1,10 @@
+fastapi>=0.136.0
+uvicorn>=0.48.0
+langchain>=1.4.0
+langchain-openai>=1.6.0
+langchain-mcp-adapters>=0.3.0
+langgraph>=1.2.0
+fastmcp>=3.4.0,<4.0.0
+sentence-transformers>=5.5.0
+faiss-cpu>=1.14.0
+python-dotenv>=1.2.0
