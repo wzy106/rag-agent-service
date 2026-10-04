@@ -15,6 +15,8 @@
 | 构建优化 | 故事 7 |
 | 协议理解 | 故事 8 |
 | 检索算法 | 故事 9、10 |
+| 生产级意识 | 故事 11、13 |
+| 功能演进回归 | 故事 12 |
 
 ---
 
@@ -359,6 +361,132 @@ def diverse_by_source(query, k=3):
 
 ---
 
+## 故事 11：Agent 可能死循环或 Token 爆炸
+
+### 问题
+Agent 在复杂任务下可能**无限调用工具**，或者**单次输出过长**，浪费 Token。
+
+比如用户问一个模糊的问题，模型可能反复检索、反复思考，陷入循环。
+
+### 分析
+- LangGraph 的 Agent 本质是循环：调模型 → 调工具 → 调模型 → ...
+- 如果模型判断一直"需要调工具"，循环永远不结束
+- 单次输出也没有上限，模型可能生成很长的回答
+
+### 方案
+两道护栏：
+
+```python
+RECURSION_LIMIT = 10    # 最大循环次数
+MAX_TOKENS = 2000       # 单次输出上限
+
+model = ChatOpenAI(
+    ...,
+    max_tokens=MAX_TOKENS,   # 护栏 1：限制输出长度
+)
+
+agent = create_agent(model, tools=tools, ...)
+
+# 护栏 2：每次调用带 recursion_limit
+config = {"recursion_limit": RECURSION_LIMIT}
+result = await agent.ainvoke({...}, config=config)
+```
+
+### 为什么这么选
+- **`recursion_limit=10`**：正常 RAG 最多循环 2~3 次（调一次工具 + 生成回答），10 是安全上限
+- **`max_tokens=2000`**：覆盖绝大多数回答，异常长回答会被截断
+- **异常处理**：护栏触发后抛异常，被 `try/except` 捕获，以 SSE 格式返回友好错误，服务不崩
+
+### 收获
+**Agent 是循环结构，必须有终止条件。** 任何循环都要考虑"什么时候停"，否则会有资源耗尽风险。这是生产级 Agent 的基本要求。
+
+---
+
+## 故事 12：多轮对话下的缓存串台
+
+### 问题
+加了多轮对话记忆后，Redis 缓存的 key 还是只按 query 的 MD5：
+
+```python
+key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
+```
+
+**结果**：会话 A 问"它是什么"拿到答案 X，缓存；会话 B 问"它是什么"直接返回 X，但会话 B 里的"它"可能是完全不同的东西。
+
+### 分析
+- 加多轮对话前：同一问题答案永远一样，缓存 key 只按 query 没问题
+- 加多轮对话后：同一问题在**不同上下文**里答案不同
+- 缓存 key 不带 thread_id → 会话之间**串台**
+
+### 方案
+缓存 key 带上 thread_id：
+
+```python
+def get_cached(thread_id: str, query: str):
+    key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
+    return r.get(key)
+
+def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
+    key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
+    r.set(key, answer, ex=ttl)
+```
+
+### 为什么这么选
+- **按会话隔离**：每个用户的缓存互不影响
+- **仍保留 MD5**：避免中文/特殊字符问题，固定长度
+- **代价**：缓存命中率下降（因为按会话分桶），但正确性优先
+
+### 收获
+**加新功能时，要检查它是否影响已有设计的假设。** 加多轮对话前，"同一 query 同一答案"是成立的；加了之后这个假设不成立，缓存设计就要跟着改。这是**功能演进引发的设计回归**。
+
+---
+
+## 故事 13：InMemorySaver 的局限
+
+### 问题
+用 `InMemorySaver` 做多轮对话记忆，功能正常，但有个根本问题：**服务重启后，所有会话记忆丢失。**
+
+### 分析
+- `InMemorySaver` 把记忆存在**进程内存**里
+- 服务重启 → 内存清空 → 用户的历史对话全没了
+- 用户回到会话里问"它是什么"，Agent 完全不知道上下文
+
+### 方案
+**开发测试**：用 `InMemorySaver`，简单够用。
+
+**生产环境**：换持久化的 Checkpointer：
+
+| 方案 | 特点 |
+|---|---|
+| `RedisSaver` | 存 Redis，快，适合已有 Redis 的项目 |
+| `PostgresSaver` | 存 PostgreSQL，官方推荐，功能全 |
+| `SQLiteSaver` | 存本地文件，轻量，适合单机 |
+
+改动很小，只需换 `checkpointer` 参数：
+
+```python
+# 开发
+from langgraph.checkpoint.memory import InMemorySaver
+memory = InMemorySaver()
+
+# 生产
+from langgraph.checkpoint.redis import RedisSaver
+memory = RedisSaver(redis_url="redis://localhost:6379")
+
+# 用法完全一样
+agent = create_agent(model, tools=tools, checkpointer=memory, ...)
+```
+
+### 为什么这么选
+- **开发用 InMemorySaver**：零配置，跑起来就行
+- **生产用 RedisSaver**：项目已有 Redis，复用基础设施
+- **PostgresSaver 备选**：如果项目用 PG 且需要更强的持久化保证
+
+### 收获
+**开发和生产的技术选型经常不同。** 开发追求"跑得快、配得少"；生产追求"稳、持久、可扩展"。面试时能说清"我用 InMemorySaver 开发，生产会换 RedisSaver"，比只会用一个方案强得多。
+
+---
+
 ## 总结
 
 这些坑覆盖了 Agent 开发中常见的几类问题：
@@ -373,5 +501,7 @@ def diverse_by_source(query, k=3):
 | 构建优化 | Dockerfile 指令顺序影响缓存效率 |
 | 协议理解 | stdio 通信要用 stderr 打日志 |
 | 检索算法 | 混合检索要调权重，MMR 是 chunk 级多样性 |
+| 生产级意识 | Agent 要有护栏，记忆要持久化 |
+| 功能演进回归 | 加新功能要检查旧设计的假设是否还成立 |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**
