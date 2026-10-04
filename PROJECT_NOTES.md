@@ -1,6 +1,7 @@
 # RAG Agent 项目复盘笔记
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
+> 面试话术见 `LESSONS_LEARNED.md`
 
 ## 一、项目简介（30 秒版本）
 
@@ -66,6 +67,7 @@ FastAPI（api_agent.py）
 - MCP 工具解耦（Agent 和工具分进程）
 - SSE 流式输出（打字机效果）
 - 中间步骤过滤（只输出最终回答）
+- **Agent 护栏（recursion_limit=10，max_tokens=2000）**
 - 异常处理（错误以 SSE 格式返回）
 - 请求日志（收到消息 + 耗时统计）
 - FAISS 索引持久化（避免重复 embedding）
@@ -332,7 +334,26 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 - 用户用口语化表达时，和文档术语有语义鸿沟
 - BM25 补上关键词匹配能力
 
-### 11. 如果让你重做，会改什么？
+### 11. 怎么防止 Agent 死循环？
+
+**两道护栏**：
+
+1. **`recursion_limit=10`**：Agent 最多循环 10 次，超过抛异常
+2. **`max_tokens=2000`**：单次输出最多 2000 token
+
+**在代码里怎么用**：
+
+```python
+config = {"recursion_limit": RECURSION_LIMIT}
+result = await agent.ainvoke({...}, config=config)
+```
+
+**触发后怎么办**：异常被 `try/except` 捕获，以 SSE 格式返回友好错误，服务不崩。
+
+**面试话术**：
+> "我给 Agent 设了两道护栏：一是 recursion_limit=10，超过自动抛异常终止；二是 max_tokens=2000，限制单次输出。第一道防止 Agent 无限调用工具，第二道防止单次回答过长。"
+
+### 12. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - RAG 加 Rerank（bge-reranker-base）
@@ -350,6 +371,7 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 - 向量库：FAISS（本地持久化）
 - 检索策略：混合检索（向量 + BM25 + 加权 RRF）
 - RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
+- **护栏参数：recursion_limit=10, max_tokens=2000**
 - 缓存：Redis（TTL 3600 秒）
 - 历史：MySQL（表 conversations）
 - 首次 Docker 构建耗时：约 19 分钟
@@ -473,7 +495,7 @@ import pymysql
 def save_conversation(thread_id: str, role: str, content: str):
     conn = pymysql.connect(
         host="localhost", port=3306, user="root",
-        password="root123", database="agent", charset="utf8mb4"
+        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
     )
     try:
         with conn.cursor() as cur:
@@ -691,7 +713,41 @@ key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
 - 命名空间隔离，Redis 里可能有其他 key
 - 方便用 `KEYS chat:*` 批量查看
 
-### 8. 面试高频问题
+### 8. Agent 护栏（防止死循环和 Token 爆炸）
+
+**问题**：Agent 在复杂任务下可能无限调用工具，或者单次输出过长，浪费 Token。
+
+**方案**：两道护栏。
+
+```python
+RECURSION_LIMIT = 10    # 最大循环次数
+MAX_TOKENS = 2000       # 单次输出上限
+
+model = ChatOpenAI(
+    ...,
+    max_tokens=MAX_TOKENS,   # 护栏 1：限制输出长度
+)
+
+agent = create_agent(model, tools=tools, ...)
+
+# 护栏 2：每次调用带 recursion_limit
+config = {"recursion_limit": RECURSION_LIMIT}
+result = await agent.ainvoke({...}, config=config)
+async for chunk in agent.astream({...}, config=config, stream_mode="messages"):
+    ...
+```
+
+**两道护栏的作用**：
+
+| 护栏 | 防止什么 | 触发后 |
+|---|---|---|
+| `recursion_limit=10` | Agent 死循环（无限调工具） | 抛 `GraphRecursionError`，被 `try/except` 捕获，返回友好错误 |
+| `max_tokens=2000` | 单次输出过长，浪费 Token | 模型自然截断，最多输出 2000 token |
+
+**面试话术**：
+> "我给 Agent 设了两道护栏：一是 recursion_limit=10，超过自动抛异常终止；二是 max_tokens=2000，限制单次输出。第一道防止 Agent 无限调用工具，第二道防止单次回答过长。在流式接口里，异常会被 try/except 捕获，以 SSE 格式返回友好错误，不会让服务崩掉。"
+
+### 9. 面试高频问题
 
 | 问题 | 答案要点 |
 |---|---|
@@ -701,6 +757,7 @@ key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
 | 流式接口怎么过滤中间步骤？ | `saw_tool` 标志分界，`pending` 缓存工具前内容 |
 | SSE 格式是什么？ | `data: 内容\n\n`，结束发 `[DONE]` |
 | MySQL 表怎么初始化？ | lifespan 里 `CREATE TABLE IF NOT EXISTS`，幂等自愈 |
+| Agent 死循环怎么防？ | `recursion_limit=10` + `max_tokens=2000` |
 
 ## 十三、RAG 评估（面试重点）
 
@@ -823,4 +880,5 @@ def measure_diversity(search_fn, name, k=3):
 - 等权混合检索：97%
 - 加权混合检索：100%
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
+- **护栏参数：recursion_limit=10, max_tokens=2000**
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service

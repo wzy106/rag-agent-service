@@ -19,6 +19,10 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(env_path)
 
+# ===== 护栏配置 =====
+RECURSION_LIMIT = 10    # Agent 最大循环次数，超过自动终止
+MAX_TOKENS = 2000       # 单次输出最大 token 数
+
 # ===== Redis 缓存 =====
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
@@ -90,7 +94,8 @@ async def lifespan(app: FastAPI):
         model="deepseek-chat",
         api_key=os.getenv("DEEPSEEK_API_KEY"),
         base_url=os.getenv("DEEPSEEK_BASE_URL"),
-        temperature=0
+        temperature=0,
+        max_tokens=MAX_TOKENS,   # 护栏：限制单次输出 token
     )
 
     agent = create_agent(
@@ -98,7 +103,7 @@ async def lifespan(app: FastAPI):
         tools=tools,
         system_prompt="你是一个知识助手，回答问题时优先调用 search_knowledge 工具查询知识库。"
     )
-    print("[启动] Agent 创建完成")
+    print(f"[启动] Agent 创建完成（护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}）")
 
     # 确保 MySQL 表存在
     ensure_table()
@@ -139,10 +144,12 @@ async def chat(payload: ChatRequest):
         save_conversation(thread_id, "ai", cached)
         return ChatResponse(reply=cached)
 
-    # 2. 缓存未命中，调 Agent
-    result = await agent.ainvoke({
-        "messages": [{"role": "user", "content": payload.message}]
-    })
+    # 2. 缓存未命中，调 Agent（带护栏）
+    config = {"recursion_limit": RECURSION_LIMIT}
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": payload.message}]},
+        config=config
+    )
     answer = result["messages"][-1].content
 
     # 3. 写缓存 + 存历史
@@ -156,7 +163,7 @@ async def chat(payload: ChatRequest):
 def get_history(thread_id: str = "user_001", limit: int = 20):
     conn = pymysql.connect(
         host="localhost", port=3306, user="root",
-        password="root123", database="agent", charset="utf8mb4"
+        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
     )
     try:
         with conn.cursor() as cur:
@@ -191,8 +198,12 @@ async def chat_stream(payload: StreamRequest):
             pending = []
             started = False
 
+            # 护栏：带 recursion_limit 的 config
+            config = {"recursion_limit": RECURSION_LIMIT}
+
             async for chunk in agent.astream(
                 {"messages": [{"role": "user", "content": payload.message}]},
+                config=config,
                 stream_mode="messages"
             ):
                 msg_chunk, metadata = chunk
