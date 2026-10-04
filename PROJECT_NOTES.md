@@ -30,8 +30,14 @@ FastAPI（api_agent.py）
     MCP Server（mcp_rag_server.py）
                    │ search_knowledge
                    ↓
-    本地 Embedding → 向量库（FAISS）
-                   │ MMR 检索 Top-3
+    ┌─────────────────────────────────┐
+    │  混合检索：                       │
+    │  向量检索 Top-9  +  BM25 Top-9   │
+    │       ↓                          │
+    │  加权 RRF 合并（向量0.7+BM25 0.3）│
+    │       ↓                          │
+    │  Top-3 返回                       │
+    └─────────────────────────────────┘
                    ↓
     检索结果返回给 Agent（循环第 ④ 步）
                    ↓ SSE 流式返回
@@ -45,7 +51,7 @@ FastAPI（api_agent.py）
 | Agent 编排 | LangChain 1.4 + LangGraph 1.2 |
 | 模型 | DeepSeek（OpenAI 兼容协议） |
 | 工具协议 | MCP（FastMCP 3.4.7） |
-| 检索 | sentence-transformers + FAISS |
+| 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF |
 | 缓存 | Redis |
 | 历史 | MySQL |
 | 服务 | FastAPI + Uvicorn |
@@ -56,6 +62,7 @@ FastAPI（api_agent.py）
 
 - 多轮对话（InMemorySaver + thread_id）
 - RAG 检索增强（本地 embedding + FAISS 向量库）
+- 混合检索（向量 + BM25 + 加权 RRF）
 - MCP 工具解耦（Agent 和工具分进程）
 - SSE 流式输出（打字机效果）
 - 中间步骤过滤（只输出最终回答）
@@ -95,7 +102,7 @@ chunks = splitter.split_documents(documents)
 - `chunk_overlap=50`：相邻块重叠 50 字符，防止关键信息被切断
 - `separators`：按优先级尝试切分，先段落再句子最后字符
 - 中文场景专门加了 `。！？` 分隔符
-- 5 个文档切分成 24 块
+- 当前知识库：2 个 Markdown 文件（真实笔记），切成 102 块
 
 ### 3. Embedding
 
@@ -129,19 +136,87 @@ else:
 - 后续启动：直接从磁盘加载，避免重复 embedding
 - 索引文件加进 `.gitignore`
 
-### 5. 检索策略（MMR）
+### 5. 检索策略
+
+#### 5.1 相似度检索
+
+```python
+results = vectorstore.similarity_search(query, k=3)
+```
+
+最基础的余弦相似度检索。
+
+#### 5.2 MMR 检索
 
 ```python
 results = vectorstore.max_marginal_relevance_search(query, k=3, fetch_k=10)
 ```
 
 - **MMR（最大边际相关性）**：兼顾相关性和多样性
-- 先用向量检索取 Top-10，再用 MMR 精排取 Top-3
 - 公式：`λ × 相关性 - (1-λ) × 与已选 chunk 的最大相似度`（默认 λ=0.5）
-- **MMR 是 chunk 级别多样性，不是文档级别**
-- 它避免的是"内容重复"，不是"来源重复"
+- **chunk 级别多样性**，不是文档级别
 - 同一文档里差异大的 chunk，MMR 也可能都选
 - 想保证"Top-3 来自不同文档"，需要额外按文档去重
+
+#### 5.3 混合检索（加权 RRF）
+
+**为什么需要**：纯向量检索对关键词不敏感，用户用口语化表达时和文档术语之间有语义鸿沟。
+
+**BM25 索引构建**：
+
+```python
+import jieba
+from rank_bm25 import BM25Okapi
+
+all_docs = list(vectorstore.docstore._dict.values())
+tokenized_corpus = [list(jieba.cut(doc.page_content)) for doc in all_docs]
+bm25 = BM25Okapi(tokenized_corpus)
+```
+
+**加权 RRF 合并**：
+
+```python
+def hybrid_search(query, k=3, rrf_k=60, vector_weight=0.7, bm25_weight=0.3):
+    # 向量检索 Top-9
+    vector_results = vectorstore.similarity_search(query, k=k*3)
+    vector_ranks = {doc.page_content: i for i, doc in enumerate(vector_results)}
+
+    # BM25 检索 Top-9
+    tokenized_query = list(jieba.cut(query))
+    bm25_scores = bm25.get_scores(tokenized_query)
+    bm25_top_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:k*3]
+    bm25_ranks = {all_docs[i].page_content: rank for rank, i in enumerate(bm25_top_indices)}
+
+    # 加权 RRF
+    all_contents = set(vector_ranks.keys()) | set(bm25_ranks.keys())
+    rrf_scores = {}
+    for content in all_contents:
+        score = 0
+        if content in vector_ranks:
+            score += vector_weight / (rrf_k + vector_ranks[content])
+        if content in bm25_ranks:
+            score += bm25_weight / (rrf_k + bm25_ranks[content])
+        rrf_scores[content] = score
+
+    top_contents = sorted(rrf_scores.keys(), key=lambda c: rrf_scores[c], reverse=True)[:k]
+    content_to_doc = {doc.page_content: doc for doc in all_docs}
+    return [content_to_doc[c] for c in top_contents]
+```
+
+**RRF 公式**：
+```
+RRF_score(doc) = Σ 权重 / (k + 排名)
+```
+
+- `k=60` 是平滑常数
+- 权重控制两路的影响
+- 排名越靠前分数越高
+- 两路都出现的文档，分数叠加
+
+**加权 RRF 的调优**：
+- 等权（0.5/0.5）：97% 召回率（反而变差）
+- 加权（0.7/0.3）：100% 召回率
+- **向量检索更可靠，给它更高权重**
 
 ## 六、遇到的坑（面试重点）
 
@@ -156,6 +231,7 @@ results = vectorstore.max_marginal_relevance_search(query, k=3, fetch_k=10)
 | stream 输出吞进中间步骤 | 工具调用前的英文思考也被流式输出 | 记录 tool 节点位置，只输出它之后的内容 |
 | Docker 构建慢 | 模型下载 + 依赖安装 | 分层缓存，模型下载放独立层 |
 | MCP Server 里的 print 看不到 | MCP 协议占用 stdout | 改成输出到 stderr |
+| 等权混合检索反而变差 | RRF 奖励两路都出现的文档，BM25 判断错会被放大 | 加权 RRF（向量 0.7 / BM25 0.3） |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -226,54 +302,54 @@ results = vectorstore.max_marginal_relevance_search(query, k=3, fetch_k=10)
 MMR = λ × Sim(query, chunk) - (1-λ) × max(Sim(chunk, 已选chunk))
 ```
 
-**含义**：
-- 第一项：候选 chunk 和查询的相关性（越高越好）
-- 第二项：候选 chunk 和已选 chunk 的最大相似度（越高越惩罚）
-- λ 默认 0.5，相关性和多样性各占一半
-
 **关键理解**：
 - MMR 在 **chunk 级别**做多样性，不是文档级别
 - 它避免的是"内容重复"，不是"来源重复"
 - 同一个文档里的两个差异大的 chunk，MMR 也会都选
 - 想保证"Top-3 来自不同文档"，需要额外按文档去重
 
-**例子**：查询"多 Agent 怎么保证消息不丢"，MMR 可能返回
-`[langchain.md 块 A, rag.md, langchain.md 块 B]`。
-两个 langchain.md 是不同 chunk，内容差异大，所以都被选中。
+### 10. 混合检索是什么？
 
-**按来源去重的后处理**：
-```python
-def diverse_by_source(query, k=3):
-    results = vectorstore.max_marginal_relevance_search(query, k=k*3, fetch_k=10)
-    seen = set()
-    out = []
-    for doc in results:
-        src = doc.metadata["source"]
-        if src not in seen:
-            out.append(doc)
-            seen.add(src)
-            if len(out) == k:
-                break
-    return out
+**全称**：Hybrid Search。
+
+**组合方式**：
+- 向量检索：按语义相似度找
+- BM25：按关键词精确匹配找
+- 两路并行，结果用 RRF 合并
+
+**RRF 公式**：
+```
+RRF_score(doc) = Σ 权重 / (k + 排名)
 ```
 
-### 10. 如果让你重做，会改什么？
+**关键理解**：
+- RRF 奖励"两路都出现"的文档
+- 如果 BM25 判断错，错误会被放大
+- 用加权 RRF 让更可靠的一路权重更高（我用向量 0.7 / BM25 0.3）
+
+**为什么需要**：
+- 纯向量检索对关键词不敏感
+- 用户用口语化表达时，和文档术语有语义鸿沟
+- BM25 补上关键词匹配能力
+
+### 11. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - RAG 加 Rerank（bge-reranker-base）
-- RAG 加评估集（RAGAS）
 - 加 API Key 鉴权和限流
 - 加 LangSmith 可观测性
 - 写单元测试和集成测试
+- 文档库扩充到几百个文件，让不同检索策略的差异更明显
 
 ## 八、项目数据（面试时能报的具体数字）
 
 - 工具数量：1 个（search_knowledge）
-- 知识库文档数：5 个 Markdown 文件
-- 切分后块数：24 块
+- 知识库文档数：2 个 Markdown 文件（真实笔记）
+- 切分后块数：102 块
 - Embedding 模型：BAAI/bge-small-zh-v1.5（512 维）
 - 向量库：FAISS（本地持久化）
-- 检索策略：MMR，Top-3
+- 检索策略：混合检索（向量 + BM25 + 加权 RRF）
+- RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
 - 缓存：Redis（TTL 3600 秒）
 - 历史：MySQL（表 conversations）
 - 首次 Docker 构建耗时：约 19 分钟
@@ -288,6 +364,7 @@ def diverse_by_source(query, k=3):
 4. 查看对话历史：GET /history?thread_id=user_001
 5. 用浏览器打开 client.html，看打字机效果
 6. 展示 Docker 一键启动：docker compose up -d
+7. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -345,6 +422,7 @@ def diverse_by_source(query, k=3):
 - 向量检索：语义相似，但可能漏关键词
 - BM25：关键词精确匹配，但不懂语义
 - 混合检索：两者加权合并，取长补短
+- RRF 是标准合并算法，公式 `Σ 权重/(k+排名)`
 
 ## 十一、Redis 缓存 + MySQL 历史（工程化）
 
@@ -656,28 +734,39 @@ def measure_diversity(search_fn, name, k=3):
     print(f"[{name}] 平均多样性：{total_docs / len(test_set):.2f} 个不同文档/查询")
 ```
 
-### 第三种策略：MMR + 按来源去重
+### 评估结果（当前 2 个文档 / 102 chunk）
 
-```python
-def diverse_search(query, k=3):
-    results = vectorstore.max_marginal_relevance_search(query, k=k*3, fetch_k=10)
-    seen_sources = set()
-    diverse_results = []
-    for doc in results:
-        src = doc.metadata["source"]
-        if src not in seen_sources:
-            diverse_results.append(doc)
-            seen_sources.add(src)
-            if len(diverse_results) == k:
-                break
-    return diverse_results
-```
+| 策略 | 召回率 |
+|---|---|
+| 普通相似度 | 30/30 = 100% |
+| MMR | 30/30 = 100% |
+| 混合检索（等权 RRF 0.5/0.5） | 29/30 = 97% |
+| 混合检索（加权 RRF 0.7/0.3） | 30/30 = 100% |
 
-- 先用 MMR 取 9 条（k*3）
-- 再按 source 去重，取前 3 个不同文档
-- 强制每个结果来自不同文档
+### 关键发现
 
-### 评估结果（30 个测试项）
+**1. 等权 RRF 反而更差（97%）**
+
+失败案例："PydanticOutputParser 怎么用？"
+- 期望：`my_langchain_notes.md`
+- 实际：`my_project_notes.md` × 3
+- 原因：BM25 看到关键词就把它排前面，两路等权时错误被放大
+
+**2. 加权 RRF 解决（100%）**
+
+- 向量权重 0.7，BM25 权重 0.3
+- 让更可靠的一路（向量检索）主导
+- 3% 的错误被消除
+
+**3. 文档规模小，差异不明显**
+
+- 只有 2 个文档、102 个 chunk
+- 三种策略都是 100%（除了等权混合）
+- 如果文档量级达到几百上千，差异会更明显
+
+### 早期评估（5 个文档 / 24 chunk）
+
+**这组数据用于对比 MMR 和相似度，体现"多样性 vs 召回率"的权衡：**
 
 | 策略 | 召回率 | 平均多样性 |
 |---|---|---|
@@ -685,15 +774,7 @@ def diverse_search(query, k=3):
 | MMR | 28/30 = 93% | 2.50 |
 | MMR + 按来源去重 | — | 3.00 |
 
-### 三种策略的权衡
-
-| 策略 | 优势 | 代价 | 适用场景 |
-|---|---|---|---|
-| 相似度 | 相关性最高 | 结果可能重复 | 追求精度 |
-| MMR | 兼顾相关性和多样性 | 相关性略降 | 默认策略 |
-| MMR + 来源去重 | 多样性拉满 | 可能挤掉最相关内容 | 需要广覆盖 |
-
-**核心结论**：MMR 用 4% 的召回率换取 25% 的多样性提升；来源去重进一步拉满多样性。三种策略没有绝对优劣，取决于下游需求。
+**核心结论**：MMR 用 4% 的召回率换取 25% 的多样性提升。
 
 ### 失败案例分析
 
@@ -705,27 +786,27 @@ def diverse_search(query, k=3):
 **案例 2**："多 Agent 系统怎么保证消息不丢？"
 - 期望：`langgraph.md`、`deployment.md`
 - 实际：`langchain.md`、`rag.md`、`langchain.md`
-- 原因：MMR 强制 chunk 级多样性时挤掉了最相关的文档；两个 langchain.md 是不同 chunk
+- 原因：MMR 强制 chunk 级多样性时挤掉了最相关的文档
 
 ### 改进方案
 
 | 方案 | 原理 | 成本 |
 |---|---|---|
-| 混合检索 | 向量 + BM25，加权合并 | 中 |
+| 混合检索 | 向量 + BM25，加权合并 | 中（已做） |
 | 查询改写 | LLM 把口语改写成术语 | 低 |
 | 文档增强 | 补充口语化同义表达 | 低 |
 | Rerank | 先粗排 Top-20，再精排 Top-3 | 中 |
 
 ### 面试答题模板
 
-> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。对比了三种策略：普通相似度召回率 97%、平均多样性 2.00；MMR 召回率 93%、平均多样性 2.50；MMR 加按来源去重，多样性 3.00。三种策略各有取舍：追求精度用相似度，需要多角度用 MMR，强制广度用来源去重。我的项目默认用 MMR，兼顾相关性和多样性。失败案例暴露了纯向量检索对口语化和术语之间语义鸿沟的处理不足，企业级方案是混合检索加 Rerank。"
+> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。对比了四种策略：相似度 100%、MMR 100%、等权混合检索 97%、加权混合检索 100%。等权 RRF 反而变差，因为 RRF 奖励两路都出现的文档，BM25 判断错会被放大。加权后（向量 0.7、BM25 0.3）问题解决。这告诉我：混合检索不一定比纯向量好，关键在于权重调优。"
 
 ### 可优化方向
 
-- 加入 BM25，实现混合检索
 - 加 Rerank 精排
 - 扩充测试集到 100 题以上
 - 引入 RAGAS 自动评估生成质量（忠实度、答案相关性）
+- 文档库扩充到几百个文件，让策略差异更明显
 
 ## 十四、项目新增数据
 
@@ -736,6 +817,10 @@ def diverse_search(query, k=3):
 - 缓存命中 vs 未命中：未命中约 2~3 秒，命中不到 0.1 秒
 - 新增接口：`GET /history?thread_id=user_001&limit=20`
 - 评估集规模：30 个测试项
-- 相似度：召回率 97%，平均多样性 2.00
-- MMR：召回率 93%，平均多样性 2.50
-- MMR + 来源去重：平均多样性 3.00
+- 当前知识库：2 个文档、102 个 chunk
+- 相似度召回率：100%
+- MMR 召回率：100%
+- 等权混合检索：97%
+- 加权混合检索：100%
+- 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
+- GitHub 仓库：https://github.com/wzy106/rag-agent-service
