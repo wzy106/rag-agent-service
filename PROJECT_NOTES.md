@@ -55,19 +55,20 @@ FastAPI（api_agent.py）
 | 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF |
 | 缓存 | Redis |
 | 历史 | MySQL |
+| 记忆 | InMemorySaver（多轮对话） |
 | 服务 | FastAPI + Uvicorn |
 | 部署 | Docker + Docker Compose |
 | 流式 | SSE（Server-Sent Events） |
 
 ## 四、核心功能
 
-- 多轮对话（InMemorySaver + thread_id）
+- 多轮对话（InMemorySaver + thread_id，支持上下文理解，缓存 key 带 thread_id 防串台）
 - RAG 检索增强（本地 embedding + FAISS 向量库）
 - 混合检索（向量 + BM25 + 加权 RRF）
 - MCP 工具解耦（Agent 和工具分进程）
 - SSE 流式输出（打字机效果）
 - 中间步骤过滤（只输出最终回答）
-- **Agent 护栏（recursion_limit=10，max_tokens=2000）**
+- Agent 护栏（recursion_limit=10，max_tokens=2000）
 - 异常处理（错误以 SSE 格式返回）
 - 请求日志（收到消息 + 耗时统计）
 - FAISS 索引持久化（避免重复 embedding）
@@ -234,6 +235,7 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 | Docker 构建慢 | 模型下载 + 依赖安装 | 分层缓存，模型下载放独立层 |
 | MCP Server 里的 print 看不到 | MCP 协议占用 stdout | 改成输出到 stderr |
 | 等权混合检索反而变差 | RRF 奖励两路都出现的文档，BM25 判断错会被放大 | 加权 RRF（向量 0.7 / BM25 0.3） |
+| 多轮对话缓存串台 | 同一问题在不同上下文答案不同 | 缓存 key 加 thread_id：`chat:{thread_id}:{md5}` |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -353,7 +355,30 @@ result = await agent.ainvoke({...}, config=config)
 **面试话术**：
 > "我给 Agent 设了两道护栏：一是 recursion_limit=10，超过自动抛异常终止；二是 max_tokens=2000，限制单次输出。第一道防止 Agent 无限调用工具，第二道防止单次回答过长。"
 
-### 12. 如果让你重做，会改什么？
+### 12. Agent 多轮对话怎么实现？
+
+**方案**：`InMemorySaver` + `thread_id`。
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+
+memory = InMemorySaver()
+agent = create_agent(model, tools=tools, checkpointer=memory, ...)
+
+config = {"configurable": {"thread_id": "user_001"}}
+result = await agent.ainvoke({...}, config=config)
+```
+
+**关键点**：
+- `InMemorySaver` 存内存，重启丢失；生产用 `RedisSaver` / `PostgresSaver`
+- `thread_id` 区分不同会话，相同 ID 共享历史
+- **缓存 key 必须带 thread_id**，否则不同会话会串台
+
+**测试验证**：
+1. 同一 thread_id 问"它是什么" → 能理解上下文 ✅
+2. 换 thread_id 问"它是什么" → 无法理解 ✅
+
+### 13. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - RAG 加 Rerank（bge-reranker-base）
@@ -371,8 +396,9 @@ result = await agent.ainvoke({...}, config=config)
 - 向量库：FAISS（本地持久化）
 - 检索策略：混合检索（向量 + BM25 + 加权 RRF）
 - RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
-- **护栏参数：recursion_limit=10, max_tokens=2000**
-- 缓存：Redis（TTL 3600 秒）
+- 护栏参数：recursion_limit=10, max_tokens=2000
+- 多轮对话：InMemorySaver + thread_id（生产可换 RedisSaver）
+- 缓存：Redis（TTL 3600 秒，key 带 thread_id）
 - 历史：MySQL（表 conversations）
 - 首次 Docker 构建耗时：约 19 分钟
 - 单次请求耗时：未命中 2~3 秒，命中 <0.1 秒
@@ -384,9 +410,11 @@ result = await agent.ainvoke({...}, config=config)
 2. 测普通对话：POST /chat
 3. 测流式对话：POST /chat/stream
 4. 查看对话历史：GET /history?thread_id=user_001
-5. 用浏览器打开 client.html，看打字机效果
-6. 展示 Docker 一键启动：docker compose up -d
-7. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+5. **演示多轮对话**：同 thread_id 连续问"MMR 是什么" → "它和普通相似度有什么区别"
+6. 演示会话隔离：换 thread_id 问"它是什么"
+7. 用浏览器打开 client.html，看打字机效果
+8. 展示 Docker 一键启动：docker compose up -d
+9. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -463,19 +491,23 @@ import redis, hashlib
 
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
-def get_cached(query: str):
-    key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
+def get_cached(thread_id: str, query: str):
+    key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
     return r.get(key)
 
-def set_cache(query: str, answer: str, ttl: int = 3600):
-    key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
+def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
+    key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
     r.set(key, answer, ex=ttl)
 ```
 
 **关键点**：
-- key 用 query 的 MD5，避免中文和特殊字符
+- key 格式：`chat:{thread_id}:{md5}`，**带 thread_id 防止多轮对话串台**
 - TTL 设 1 小时，过期自动清理
 - 命中缓存不调大模型，省 Token 也省时间
+
+**为什么缓存 key 要带 thread_id**：
+- 同一问题在不同上下文里答案可能不同
+- 不加 thread_id 会把会话 A 的答案给会话 B
 
 ### MySQL 对话历史实现
 
@@ -517,27 +549,28 @@ def save_conversation(thread_id: str, role: str, content: str):
 ### 完整数据流
 
 ```text
-用户提问
+用户提问（带 thread_id）
     ↓
-Redis 查缓存
+Redis 查缓存（key 带 thread_id）
     ├── 命中 → 返回缓存 + 写 MySQL 历史
-    └── 未命中 → 调 Agent → 写 Redis 缓存 + 写 MySQL 历史 → 返回
+    └── 未命中 → 调 Agent（带 thread_id 记忆） → 写 Redis 缓存 + 写 MySQL 历史 → 返回
 ```
 
 ### 面试答题要点
 
 | 问题 | 答案 |
 |---|---|
-| 高频问题怎么优化？ | Redis 缓存，key 是 query 的 MD5，TTL 一小时 |
+| 高频问题怎么优化？ | Redis 缓存，key 带 thread_id，TTL 一小时 |
 | 对话历史怎么持久化？ | MySQL 存，按 thread_id 分组 |
 | 多实例部署怎么共享状态？ | MySQL + Redis 都放外部，实例无状态 |
 | Redis 和 MySQL 区别？ | Redis 内存、快、适合缓存；MySQL 磁盘、持久、适合结构化数据 |
 | 限流怎么做？ | Redis `incr` + `expire`，每分钟超 N 次返回 429 |
 | 为什么缓存 key 用 MD5？ | 避免中文/特殊字符问题，固定长度省内存 |
+| 为什么缓存 key 还要加 thread_id？ | 多轮对话下同一问题上下文不同，防串台 |
 
 ### 可优化方向
 
-- 缓存加版本号（`chat:v1:xxx`），prompt 改了自动失效
+- 缓存加版本号（`chat:v1:{thread_id}:xxx`），prompt 改了自动失效
 - 历史只加载最近 N 轮，避免上下文太长
 - Redis 加密码和连接池，生产环境必须
 - 用连接池代替每次新建连接（性能优化）
@@ -549,6 +582,7 @@ Redis 查缓存
 ```python
 class ChatRequest(BaseModel):
     message: str
+    thread_id: str = "user_001"
 
 class ChatResponse(BaseModel):
     reply: str
@@ -570,7 +604,8 @@ class ChatResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动逻辑
-    agent = create_agent(...)
+    memory = InMemorySaver()
+    agent = create_agent(model, tools=tools, checkpointer=memory, ...)
     ensure_table()
     yield
     # 关闭逻辑
@@ -588,6 +623,7 @@ app = FastAPI(lifespan=lifespan)
 - 连接数据库 / Redis / MCP Server
 - 加载模型
 - 建表（幂等）
+- 初始化 Agent 和记忆
 
 ### 3. MySQL 幂等建表
 
@@ -701,7 +737,7 @@ finally:
 ### 7. Redis 缓存 key 设计
 
 ```python
-key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
+key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
 ```
 
 **为什么用 MD5？**
@@ -709,9 +745,9 @@ key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
 - 长 query 当 key 浪费内存
 - MD5 固定 32 字符，安全稳定
 
-**为什么加 `chat:` 前缀？**
-- 命名空间隔离，Redis 里可能有其他 key
-- 方便用 `KEYS chat:*` 批量查看
+**为什么加 `chat:` 前缀和 `thread_id`？**
+- `chat:`：命名空间隔离，Redis 里可能有其他 key
+- `thread_id`：多轮对话下同一问题上下文不同，**防止串台**
 
 ### 8. Agent 护栏（防止死循环和 Token 爆炸）
 
@@ -747,7 +783,62 @@ async for chunk in agent.astream({...}, config=config, stream_mode="messages"):
 **面试话术**：
 > "我给 Agent 设了两道护栏：一是 recursion_limit=10，超过自动抛异常终止；二是 max_tokens=2000，限制单次输出。第一道防止 Agent 无限调用工具，第二道防止单次回答过长。在流式接口里，异常会被 try/except 捕获，以 SSE 格式返回友好错误，不会让服务崩掉。"
 
-### 9. 面试高频问题
+### 9. 多轮对话记忆
+
+**问题**：Agent 默认没有记忆，每轮对话独立。用户问"它和普通相似度有什么区别"时，Agent 不知道"它"指什么。
+
+**方案**：用 `InMemorySaver` + `thread_id`。
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+
+memory = InMemorySaver()
+
+agent = create_agent(
+    model,
+    tools=tools,
+    checkpointer=memory,      # 挂载记忆
+    system_prompt="..."
+)
+```
+
+请求时传 `thread_id`：
+
+```python
+config = {
+    "configurable": {"thread_id": thread_id},
+    "recursion_limit": RECURSION_LIMIT,
+}
+result = await agent.ainvoke({...}, config=config)
+```
+
+**关键点**：
+
+| 概念 | 作用 |
+|---|---|
+| `InMemorySaver` | 记忆存储位置（内存） |
+| `checkpointer=memory` | 把存储器挂到 Agent |
+| `thread_id` | 区分不同会话，相同 ID 共享历史 |
+
+**缓存 key 也要带 thread_id**：
+
+```python
+key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
+```
+
+因为同一个问题在不同上下文里答案可能不同，不加 thread_id 会导致不同会话串台。
+
+**测试验证**：
+1. `test_001` 问"MMR 是什么？" → 正常回答
+2. `test_001` 问"它和普通相似度检索有什么区别？" → 理解"它"指 MMR ✅
+3. `test_002` 问"它是什么？" → 不知道"它"指什么 ✅（会话隔离）
+
+**生产优化**：`InMemorySaver` 重启即丢，生产环境换 `RedisSaver` 或 `PostgresSaver`。
+
+**面试话术**：
+> "我用 InMemorySaver 做多轮对话记忆，通过 thread_id 区分不同会话。每次请求带 config 里的 thread_id，Agent 会自动加载该会话的历史消息作为上下文。同一个问题在不同会话里上下文不同，所以我的 Redis 缓存 key 也带了 thread_id，避免串台。生产环境会换成 RedisSaver 保证重启不丢。"
+
+### 10. 面试高频问题
 
 | 问题 | 答案要点 |
 |---|---|
@@ -758,6 +849,7 @@ async for chunk in agent.astream({...}, config=config, stream_mode="messages"):
 | SSE 格式是什么？ | `data: 内容\n\n`，结束发 `[DONE]` |
 | MySQL 表怎么初始化？ | lifespan 里 `CREATE TABLE IF NOT EXISTS`，幂等自愈 |
 | Agent 死循环怎么防？ | `recursion_limit=10` + `max_tokens=2000` |
+| Agent 多轮对话怎么实现？ | InMemorySaver + thread_id，缓存 key 带 thread_id 防串台 |
 
 ## 十三、RAG 评估（面试重点）
 
@@ -867,7 +959,7 @@ def measure_diversity(search_fn, name, k=3):
 
 ## 十四、项目新增数据
 
-- Redis key 格式：`chat:{md5}`
+- Redis key 格式：`chat:{thread_id}:{md5}`
 - Redis TTL：3600 秒
 - MySQL 表名：`conversations`
 - MySQL 字段：id, thread_id, role, content, created_at
@@ -880,5 +972,6 @@ def measure_diversity(search_fn, name, k=3):
 - 等权混合检索：97%
 - 加权混合检索：100%
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
-- **护栏参数：recursion_limit=10, max_tokens=2000**
+- 护栏参数：recursion_limit=10, max_tokens=2000
+- 多轮对话：InMemorySaver + thread_id，支持上下文理解
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
