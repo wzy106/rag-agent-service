@@ -1,18 +1,16 @@
 import os
-import sys
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
+import json
 import jieba
 from pathlib import Path
 from rank_bm25 import BM25Okapi
-from fastmcp import FastMCP
-from langchain_core.documents import Document
-from langchain_core.embeddings import Embeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
 
+# ===== 加载 embedding 和 FAISS =====
 class LocalEmbeddings(Embeddings):
     def __init__(self, model_path):
         self.model = SentenceTransformer(model_path)
@@ -25,52 +23,25 @@ model_path = str(next((Path.home() / ".cache" / "huggingface" / "hub" / "models-
 embedding = LocalEmbeddings(model_path)
 
 INDEX_DIR = Path(__file__).resolve().parent.parent / "faiss_index"
-
-if INDEX_DIR.exists():
-    vectorstore = FAISS.load_local(
-        str(INDEX_DIR),
-        embedding,
-        allow_dangerous_deserialization=True
-    )
-    print("[RAG Server] 从磁盘加载索引", file=sys.stderr)
-else:
-    docs_dir = Path(__file__).resolve().parent.parent / "docs"
-    documents = []
-    for md_file in docs_dir.glob("*.md"):
-        text = md_file.read_text(encoding="utf-8")
-        documents.append(Document(page_content=text, metadata={"source": md_file.name}))
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300,
-        chunk_overlap=50,
-        separators=["\n\n", "\n", "。", "！", "？", " ", ""],
-    )
-    chunks = splitter.split_documents(documents)
-    print(f"[RAG Server] 首次构建索引，{len(chunks)} 块", file=sys.stderr)
-
-    vectorstore = FAISS.from_documents(chunks, embedding)
-    vectorstore.save_local(str(INDEX_DIR))
-    print(f"[RAG Server] 索引已保存到 {INDEX_DIR}", file=sys.stderr)
+vectorstore = FAISS.load_local(str(INDEX_DIR), embedding, allow_dangerous_deserialization=True)
 
 # ===== 构建 BM25 索引 =====
 all_docs = list(vectorstore.docstore._dict.values())
+print(f"从 FAISS 加载了 {len(all_docs)} 个 chunk")
+
 tokenized_corpus = [list(jieba.cut(doc.page_content)) for doc in all_docs]
 bm25 = BM25Okapi(tokenized_corpus)
-print(f"[RAG Server] BM25 索引构建完成，{len(all_docs)} 个 chunk", file=sys.stderr)
 
-# ===== 混合检索函数 =====
+# ===== 混合检索 =====
 def hybrid_search(query, k=3, rrf_k=60, vector_weight=0.7, bm25_weight=0.3):
-    # 向量检索
     vector_results = vectorstore.similarity_search(query, k=k*3)
     vector_ranks = {doc.page_content: i for i, doc in enumerate(vector_results)}
 
-    # BM25 检索
     tokenized_query = list(jieba.cut(query))
     bm25_scores = bm25.get_scores(tokenized_query)
     bm25_top_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:k*3]
     bm25_ranks = {all_docs[i].page_content: rank for rank, i in enumerate(bm25_top_indices)}
 
-    # 加权 RRF 合并
     all_contents = set(vector_ranks.keys()) | set(bm25_ranks.keys())
     rrf_scores = {}
     for content in all_contents:
@@ -85,14 +56,27 @@ def hybrid_search(query, k=3, rrf_k=60, vector_weight=0.7, bm25_weight=0.3):
     content_to_doc = {doc.page_content: doc for doc in all_docs}
     return [content_to_doc[c] for c in top_contents]
 
-# ===== MCP Server =====
-mcp = FastMCP("RAG Knowledge Server")
+# ===== 评估对比 =====
+with open(Path(__file__).resolve().parent / "test_set.json", encoding="utf-8") as f:
+    test_set = json.load(f)
 
-@mcp.tool
-def search_knowledge(query: str) -> str:
-    """从知识库中检索与问题相关的信息，返回最相关的文档片段。"""
-    results = hybrid_search(query, k=3)
-    return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
+def evaluate(search_fn, name, k=3):
+    hit = 0
+    for item in test_set:
+        results = search_fn(item["question"], k)
+        sources = [doc.metadata["source"] for doc in results]
+        if any(exp in sources for exp in item["expected_sources"]):
+            hit += 1
+        else:
+            print(f"  ❌ {item['question']} → 期望 {item['expected_sources']}，实际 {sources}")
+    recall = hit / len(test_set)
+    print(f"\n[{name}] 召回率：{hit}/{len(test_set)} = {recall:.0%}")
 
-if __name__ == "__main__":
-    mcp.run()
+print("=== 普通相似度 ===")
+evaluate(lambda q, k: vectorstore.similarity_search(q, k=k), "相似度")
+
+print("\n=== MMR ===")
+evaluate(lambda q, k: vectorstore.max_marginal_relevance_search(q, k=k, fetch_k=10), "MMR")
+
+print("\n=== 混合检索（向量 + BM25 + RRF）===")
+evaluate(hybrid_search, "混合检索")
