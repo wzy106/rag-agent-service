@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.checkpoint.memory import InMemorySaver
 
 # 找 .env（在上一级目录）
 env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -26,12 +27,12 @@ MAX_TOKENS = 2000       # 单次输出最大 token 数
 # ===== Redis 缓存 =====
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
-def get_cached(query: str):
-    key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
+def get_cached(thread_id: str, query: str):
+    key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
     return r.get(key)
 
-def set_cache(query: str, answer: str, ttl: int = 3600):
-    key = f"chat:{hashlib.md5(query.encode()).hexdigest()}"
+def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
+    key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
     r.set(key, answer, ex=ttl)
 
 # ===== MySQL 对话历史 =====
@@ -98,12 +99,16 @@ async def lifespan(app: FastAPI):
         max_tokens=MAX_TOKENS,   # 护栏：限制单次输出 token
     )
 
+    # 多轮对话记忆（内存版，生产可换 RedisSaver / PostgresSaver）
+    memory = InMemorySaver()
+
     agent = create_agent(
         model,
         tools=tools,
+        checkpointer=memory,     # 多轮对话：按 thread_id 保存历史
         system_prompt="你是一个知识助手，回答问题时优先调用 search_knowledge 工具查询知识库。"
     )
-    print(f"[启动] Agent 创建完成（护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}）")
+    print(f"[启动] Agent 创建完成（多轮记忆 + 护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}）")
 
     # 确保 MySQL 表存在
     ensure_table()
@@ -124,6 +129,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    thread_id: str = "user_001"     # 新增：会话 ID，默认 user_001
 
 class ChatResponse(BaseModel):
     reply: str
@@ -134,18 +140,21 @@ def root():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest):
-    thread_id = "user_001"
+    thread_id = payload.thread_id
 
-    # 1. 先查缓存
-    cached = get_cached(payload.message)
+    # 1. 先查缓存（缓存 key 带 thread_id）
+    cached = get_cached(thread_id, payload.message)
     if cached:
         print(f"[缓存命中] {payload.message}")
         save_conversation(thread_id, "human", payload.message)
         save_conversation(thread_id, "ai", cached)
         return ChatResponse(reply=cached)
 
-    # 2. 缓存未命中，调 Agent（带护栏）
-    config = {"recursion_limit": RECURSION_LIMIT}
+    # 2. 缓存未命中，调 Agent（带护栏 + thread_id）
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": RECURSION_LIMIT,
+    }
     result = await agent.ainvoke(
         {"messages": [{"role": "user", "content": payload.message}]},
         config=config
@@ -153,7 +162,7 @@ async def chat(payload: ChatRequest):
     answer = result["messages"][-1].content
 
     # 3. 写缓存 + 存历史
-    set_cache(payload.message, answer)
+    set_cache(thread_id, payload.message, answer)
     save_conversation(thread_id, "human", payload.message)
     save_conversation(thread_id, "ai", answer)
     print(f"[缓存写入] {payload.message}")
@@ -186,11 +195,13 @@ def get_history(thread_id: str = "user_001", limit: int = 20):
 
 class StreamRequest(BaseModel):
     message: str
+    thread_id: str = "user_001"     # 新增
 
 @app.post("/chat/stream")
 async def chat_stream(payload: StreamRequest):
     start_time = time.time()
-    print(f"[请求] 收到消息：{payload.message}")
+    thread_id = payload.thread_id
+    print(f"[请求] 收到消息：{payload.message}（thread_id={thread_id}）")
 
     async def event_generator():
         try:
@@ -198,8 +209,11 @@ async def chat_stream(payload: StreamRequest):
             pending = []
             started = False
 
-            # 护栏：带 recursion_limit 的 config
-            config = {"recursion_limit": RECURSION_LIMIT}
+            # 护栏 + thread_id
+            config = {
+                "configurable": {"thread_id": thread_id},
+                "recursion_limit": RECURSION_LIMIT,
+            }
 
             async for chunk in agent.astream(
                 {"messages": [{"role": "user", "content": payload.message}]},
