@@ -18,6 +18,7 @@
 | 生产级意识 | 故事 11、13 |
 | 功能演进回归 | 故事 12 |
 | 幻觉治理 | 故事 14 |
+| 评估方法 | 故事 15 |
 
 ---
 
@@ -541,6 +542,69 @@ if not results:
 
 ---
 
+## 故事 15：RAG 评估不能只看召回率
+
+### 问题
+一开始评估 RAG 只用召回率。但召回率有个问题：**只要期望文档出现在 Top-3 里就算命中**，不管它排第 1 还是第 3，也不管 Top-3 里其他两条是不是相关。
+
+### 分析
+单看召回率会漏掉这些信息：
+- **精确率**：Top-K 里有几条是真正相关的
+- **MRR**：第一个正确结果排多前
+- **多样性**：结果覆盖了多少不同来源
+
+### 方案
+加三个指标：
+
+```python
+def evaluate_full(search_fn, name, k=3):
+    hit = 0
+    precision_sum = 0
+    mrr_sum = 0
+
+    for item in test_set:
+        results = search_fn(item["question"], k)
+        sources = [doc.metadata["source"] for doc in results]
+
+        # 召回率：期望文档有没有出现
+        if any(exp in sources for exp in item["expected_sources"]):
+            hit += 1
+
+        # 精确率：Top-k 里有多少是期望文档
+        if sources:
+            relevant = sum(1 for s in sources if s in item["expected_sources"])
+            precision_sum += relevant / len(sources)
+
+        # MRR：第一个正确结果的排名倒数
+        for rank, s in enumerate(sources, 1):
+            if s in item["expected_sources"]:
+                mrr_sum += 1 / rank
+                break
+
+    n = len(test_set)
+    print(f"召回率：{hit/n:.0%}")
+    print(f"精确率：{precision_sum/n:.2f}")
+    print(f"MRR：{mrr_sum/n:.2f}")
+```
+
+### 实测结果
+
+| 策略 | 召回率 | 精确率 | MRR | 多样性 |
+|---|---|---|---|---|
+| 相似度 | 100% | **0.87** | 0.96 | 1.37 |
+| MMR | 100% | 0.83 | **0.97** | 1.43 |
+| MMR + 去重 | 100% | 0.77 | **0.97** | **1.57** |
+
+### 关键发现
+- **精确率和多样性呈 trade-off**：想要多角度信息，就要接受部分结果不直接相关
+- **MRR 几乎不变**：三种策略的 Top-1 都很准
+- **选策略看业务**：追求精确用相似度，需要多角度用 MMR+去重
+
+### 收获
+**单一指标会误导。** 只看召回率以为三种策略一样好，加上精确率和多样性才看出它们的 trade-off。**评估 RAG 要多个指标一起看。**
+
+---
+
 ## 总结
 
 这些坑覆盖了 Agent 开发中常见的几类问题：
@@ -558,5 +622,6 @@ if not results:
 | 生产级意识 | Agent 要有护栏，记忆要持久化 |
 | 功能演进回归 | 加新功能要检查旧设计的假设是否还成立 |
 | 幻觉治理 | Prompt 软约束 + 检索层硬降级，两层防护 |
+| 评估方法 | 单一指标会误导，要多个指标一起看 |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**

@@ -70,7 +70,7 @@ FastAPI（api_agent.py）
 - 多轮对话（InMemorySaver + thread_id，支持上下文理解，缓存 key 带 thread_id 防串台）
 - RAG 检索增强（本地 embedding + FAISS 向量库）
 - 混合检索（向量 + BM25 + 加权 RRF）
-- **降级策略（距离阈值，避免幻觉）**
+- 降级策略（距离阈值，避免幻觉）
 - MCP 工具解耦（Agent 和工具分进程）
 - SSE 流式输出（打字机效果）
 - 中间步骤过滤（只输出最终回答）
@@ -80,7 +80,7 @@ FastAPI（api_agent.py）
 - FAISS 索引持久化（避免重复 embedding）
 - Redis 缓存高频问题（省 Token）
 - MySQL 持久化对话历史
-- RAG 评估（召回率 + 多样性对比）
+- RAG 评估（召回率 + 精确率 + MRR + 多样性）
 
 ## 五、RAG 完整链路（面试重点）
 
@@ -299,6 +299,7 @@ def search_knowledge(query: str) -> str:
 | 等权混合检索反而变差 | RRF 奖励两路都出现的文档，BM25 判断错会被放大 | 加权 RRF（向量 0.7 / BM25 0.3） |
 | 多轮对话缓存串台 | 同一问题在不同上下文答案不同 | 缓存 key 加 thread_id：`chat:{thread_id}:{md5}` |
 | 无关问题触发幻觉 | 检索无相关内容时直接调 LLM | 距离阈值降级，返回"没找到"不调 LLM |
+| 单一评估指标误导 | 只看召回率无法区分策略 | 加精确率、MRR、多样性 |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -462,7 +463,29 @@ result = await agent.ainvoke({...}, config=config)
 **面试话术**：
 > "我在检索层加了降级策略。用相似度距离做阈值，超过阈值就返回'知识库中没有相关信息'，不调 LLM。这样避免模型在缺乏依据时产生幻觉。阈值是通过实测校准的，我测了正常问题和无关问题的距离分布，选了能分开两类的最优值。"
 
-### 14. 如果让你重做，会改什么？
+### 14. RAG 评估用什么指标？
+
+**四个指标**：
+
+| 指标 | 公式 | 含义 |
+|---|---|---|
+| 召回率 | 命中数 / 总数 | 该找的有没有找到 |
+| 精确率 | 平均（相关结果数 / Top-K 总数） | 找到的有多少是对的 |
+| MRR | 平均（1 / 第一个正确结果的排名） | 第一个正确结果排多前 |
+| 多样性 | 平均（Top-K 里不同文档数） | 结果覆盖多少不同来源 |
+
+**实测数据**（30 个测试项）：
+
+| 策略 | 召回率 | 精确率 | MRR | 多样性 |
+|---|---|---|---|---|
+| 相似度 | 100% | 0.87 | 0.96 | 1.37 |
+| MMR | 100% | 0.83 | 0.97 | 1.43 |
+| MMR + 去重 | 100% | 0.77 | 0.97 | 1.57 |
+
+**面试话术**：
+> "我评估 RAG 用了四个指标。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。实测发现精确率和多样性呈 trade-off：追求精确用相似度，需要多角度用 MMR+去重。MRR 三种策略都在 0.96 以上，Top-1 都很准。"
+
+### 15. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - RAG 加 Rerank（bge-reranker-base）
@@ -485,6 +508,7 @@ result = await agent.ainvoke({...}, config=config)
 - 多轮对话：InMemorySaver + thread_id（生产可换 RedisSaver）
 - 缓存：Redis（TTL 3600 秒，key 带 thread_id）
 - 历史：MySQL（表 conversations）
+- 评估指标：召回率 / 精确率 / MRR / 多样性（30 个测试项）
 - 首次 Docker 构建耗时：约 19 分钟
 - 单次请求耗时：未命中 2~3 秒，命中 <0.1 秒
 - 镜像大小：10.4 GB（实际磁盘占用 3.46 GB）
@@ -497,7 +521,7 @@ result = await agent.ainvoke({...}, config=config)
 4. 查看对话历史：GET /history?thread_id=user_001
 5. 演示多轮对话：同 thread_id 连续问"MMR 是什么" → "它和普通相似度有什么区别"
 6. 演示会话隔离：换 thread_id 问"它是什么"
-7. **演示降级策略**：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
+7. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
 8. 用浏览器打开 client.html，看打字机效果
 9. 展示 Docker 一键启动：docker compose up -d
 10. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
@@ -537,12 +561,14 @@ result = await agent.ainvoke({...}, config=config)
 
 ### RAG 评估指标
 
-| 指标 | 含义 |
-|---|---|
-| 召回率 | 相关文档有没有被检索到 |
-| 精确率 | 检索到的有多少是相关的 |
-| 忠实度 | 回答是否忠于检索结果 |
-| 答案相关性 | 回答是否切题 |
+| 指标 | 公式 | 含义 |
+|---|---|---|
+| 召回率 | 命中数 / 总数 | 相关文档有没有被检索到 |
+| 精确率 | 平均（相关结果数 / Top-K 总数） | 检索到的有多少是相关的 |
+| MRR | 平均（1 / 第一个正确结果的排名） | 第一个正确结果排多前 |
+| 多样性 | 平均（Top-K 里不同文档数） | 结果覆盖多少不同来源 |
+| 忠实度 | 人工 / RAGAS | 回答是否忠于检索结果 |
+| 答案相关性 | 人工 / RAGAS | 回答是否切题 |
 
 工具：RAGAS
 
@@ -977,6 +1003,7 @@ def hybrid_search(query, k=3, max_distance=MAX_DISTANCE, ...):
 | Agent 死循环怎么防？ | `recursion_limit=10` + `max_tokens=2000` |
 | Agent 多轮对话怎么实现？ | InMemorySaver + thread_id，缓存 key 带 thread_id 防串台 |
 | 检索不到内容怎么处理？ | 距离阈值降级，返回"没找到"，不调 LLM |
+| RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 |
 
 ## 十三、RAG 评估（面试重点）
 
@@ -1001,44 +1028,66 @@ def evaluate(search_fn, name, k=3):
     recall = hit / len(test_set)
     print(f"[{name}] 召回率：{hit}/{len(test_set)} = {recall:.0%}")
 
-def measure_diversity(search_fn, name, k=3):
-    total_docs = 0
+def evaluate_full(search_fn, name, k=3):
+    hit = 0
+    precision_sum = 0
+    mrr_sum = 0
+
     for item in test_set:
         results = search_fn(item["question"], k)
-        sources = set(doc.metadata["source"] for doc in results)
-        total_docs += len(sources)
-    print(f"[{name}] 平均多样性：{total_docs / len(test_set):.2f} 个不同文档/查询")
+        sources = [doc.metadata["source"] for doc in results]
+
+        # 召回率
+        if any(exp in sources for exp in item["expected_sources"]):
+            hit += 1
+
+        # 精确率
+        if sources:
+            relevant = sum(1 for s in sources if s in item["expected_sources"])
+            precision_sum += relevant / len(sources)
+
+        # MRR
+        for rank, s in enumerate(sources, 1):
+            if s in item["expected_sources"]:
+                mrr_sum += 1 / rank
+                break
+
+    n = len(test_set)
+    print(f"[{name}]")
+    print(f"  召回率：{hit}/{n} = {hit/n:.0%}")
+    print(f"  精确率：{precision_sum/n:.2f}")
+    print(f"  MRR：{mrr_sum/n:.2f}")
 ```
 
 ### 评估结果（当前 2 个文档 / 102 chunk）
 
-| 策略 | 召回率 |
-|---|---|
-| 普通相似度 | 30/30 = 100% |
-| MMR | 30/30 = 100% |
-| 混合检索（等权 RRF 0.5/0.5） | 29/30 = 97% |
-| 混合检索（加权 RRF 0.7/0.3） | 30/30 = 100% |
+**四个指标对比**：
+
+| 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
+|---|---|---|---|---|
+| 普通相似度 | 100% | **0.87** | 0.96 | 1.37 |
+| MMR | 100% | 0.83 | **0.97** | 1.43 |
+| MMR + 按来源去重 | 100% | 0.77 | **0.97** | **1.57** |
 
 ### 关键发现
 
-**1. 等权 RRF 反而更差（97%）**
+**1. 精确率和多样性呈明显 trade-off**
 
-失败案例："PydanticOutputParser 怎么用？"
-- 期望：`my_langchain_notes.md`
-- 实际：`my_project_notes.md` × 3
-- 原因：BM25 看到关键词就把它排前面，两路等权时错误被放大
+- 相似度：精确率最高（0.87），多样性最低（1.37）
+- MMR + 去重：多样性最高（1.57），精确率最低（0.77）
+- **这是必然的取舍**：想要多角度信息，就要接受部分结果不直接相关
 
-**2. 加权 RRF 解决（100%）**
+**2. MRR 几乎不变（0.96~0.97）**
 
-- 向量权重 0.7，BM25 权重 0.3
-- 让更可靠的一路（向量检索）主导
-- 3% 的错误被消除
+三种策略的 Top-1 都很准，第一个正确结果总是排第一。
 
-**3. 文档规模小，差异不明显**
+**3. 选哪个策略取决于业务**
 
-- 只有 2 个文档、102 个 chunk
-- 三种策略都是 100%（除了等权混合）
-- 如果文档量级达到几百上千，差异会更明显
+| 场景 | 推荐策略 |
+|---|---|
+| 追求精确（如事实查询） | 相似度 |
+| 需要多角度（如分析任务） | MMR + 去重 |
+| 平衡 | MMR |
 
 ### 早期评估（5 个文档 / 24 chunk）
 
@@ -1070,13 +1119,14 @@ def measure_diversity(search_fn, name, k=3):
 |---|---|---|
 | 混合检索 | 向量 + BM25，加权合并 | 中（已做） |
 | 降级策略 | 距离阈值拦截无关问题 | 低（已做） |
+| 多指标评估 | 召回率 + 精确率 + MRR + 多样性 | 低（已做） |
 | 查询改写 | LLM 把口语改写成术语 | 低 |
 | 文档增强 | 补充口语化同义表达 | 低 |
 | Rerank | 先粗排 Top-20，再精排 Top-3 | 中 |
 
 ### 面试答题模板
 
-> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。对比了四种策略：相似度 100%、MMR 100%、等权混合检索 97%、加权混合检索 100%。等权 RRF 反而变差，因为 RRF 奖励两路都出现的文档，BM25 判断错会被放大。加权后（向量 0.7、BM25 0.3）问题解决。这告诉我：混合检索不一定比纯向量好，关键在于权重调优。"
+> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标：召回率、精确率、MRR、多样性。实测发现精确率和多样性呈 trade-off：纯相似度精确率 0.87、多样性 1.37；MMR+去重多样性 1.57、精确率 0.77。MRR 三种策略都在 0.96 以上，Top-1 都很准。选策略看业务——追求精确用相似度，需要多角度用 MMR+去重。之前还发现等权 RRF 反而比纯向量差（97%），加权后（向量 0.7、BM25 0.3）恢复到 100%。"
 
 ### 可优化方向
 
@@ -1095,10 +1145,10 @@ def measure_diversity(search_fn, name, k=3):
 - 新增接口：`GET /history?thread_id=user_001&limit=20`
 - 评估集规模：30 个测试项
 - 当前知识库：2 个文档、102 个 chunk
-- 相似度召回率：100%
-- MMR 召回率：100%
-- 等权混合检索：97%
-- 加权混合检索：100%
+- 评估指标：召回率 / 精确率 / MRR / 多样性
+- 相似度：召回率 100%，精确率 0.87，MRR 0.96，多样性 1.37
+- MMR：召回率 100%，精确率 0.83，MRR 0.97，多样性 1.43
+- MMR + 去重：召回率 100%，精确率 0.77，MRR 0.97，多样性 1.57
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
