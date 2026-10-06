@@ -19,6 +19,7 @@
 | 功能演进回归 | 故事 12 |
 | 幻觉治理 | 故事 14 |
 | 评估方法 | 故事 15 |
+| 记忆持久化 | 故事 16 |
 
 ---
 
@@ -605,6 +606,65 @@ def evaluate_full(search_fn, name, k=3):
 
 ---
 
+## 故事 16：InMemorySaver 重启丢记忆
+
+### 问题
+用 `InMemorySaver` 做多轮对话，功能正常。但服务重启后，用户的历史对话全没了。
+
+### 分析
+- `InMemorySaver` 把记忆存在**进程内存**里
+- 服务重启 → 内存清空 → 用户的历史对话全没了
+- 用户回来问"它是什么"，Agent 完全不知道上下文
+
+### 方案
+**两层记忆**：
+
+| 层 | 存储 | 作用 |
+|---|---|---|
+| 短期 | `InMemorySaver` | 单次会话内多轮，快 |
+| 长期 | MySQL | 跨会话持久化，不怕重启 |
+
+每次请求，先从 MySQL 加载最近 N 轮历史，拼进 messages：
+
+```python
+HISTORY_ROUNDS = 3
+
+def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
+    conn = pymysql.connect(...)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, content FROM conversations "
+                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
+                (thread_id, rounds * 2)
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    return [{"role": r, "content": c} for r, c in reversed(rows)]
+
+# 在接口里
+history = load_recent_history(thread_id)
+messages = history + [{"role": "user", "content": payload.message}]
+result = await agent.ainvoke({"messages": messages}, config=config)
+```
+
+### 关键设计
+- **限制轮数**（3 轮）：避免上下文爆炸
+- **正序返回**：模型看到的时间线要正确
+- **每次实时加载**：MySQL 是权威数据源
+
+### 验证
+1. 第一轮问 MMR → `[长期记忆] 加载了 0 条历史消息`
+2. **重启服务**
+3. 第二轮问"它和普通相似度有什么区别？" → `[长期记忆] 加载了 2 条历史消息` + 能理解"它" ✅
+
+### 收获
+**开发用 InMemorySaver，生产用持久化方案。** 不是替代关系，是互补关系。InMemorySaver 快但易失，MySQL 慢但持久。生产系统往往两者都用：MySQL 存历史，InMemorySaver 做单次会话加速。
+
+---
+
 ## 总结
 
 这些坑覆盖了 Agent 开发中常见的几类问题：
@@ -623,5 +683,6 @@ def evaluate_full(search_fn, name, k=3):
 | 功能演进回归 | 加新功能要检查旧设计的假设是否还成立 |
 | 幻觉治理 | Prompt 软约束 + 检索层硬降级，两层防护 |
 | 评估方法 | 单一指标会误导，要多个指标一起看 |
+| 记忆持久化 | 短期 InMemorySaver + 长期 MySQL，两层互补 |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**

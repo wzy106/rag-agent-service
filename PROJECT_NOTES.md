@@ -47,6 +47,10 @@ FastAPI（api_agent.py）
     检索结果返回给 Agent（循环第 ④ 步）
                    ↓ SSE 流式返回
 客户端
+
+记忆层：
+- 短期：InMemorySaver（进程内存，单次会话加速）
+- 长期：MySQL（按 thread_id 加载最近 3 轮历史）
 ```
 
 ## 三、技术栈
@@ -60,14 +64,14 @@ FastAPI（api_agent.py）
 | 降级 | 向量距离阈值（避免幻觉） |
 | 缓存 | Redis |
 | 历史 | MySQL |
-| 记忆 | InMemorySaver（多轮对话） |
+| 记忆 | InMemorySaver（短期）+ MySQL（长期） |
 | 服务 | FastAPI + Uvicorn |
 | 部署 | Docker + Docker Compose |
 | 流式 | SSE（Server-Sent Events） |
 
 ## 四、核心功能
 
-- 多轮对话（InMemorySaver + thread_id，支持上下文理解，缓存 key 带 thread_id 防串台）
+- **两层记忆**：短期 InMemorySaver + 长期 MySQL 历史加载（重启后仍记得上下文）
 - RAG 检索增强（本地 embedding + FAISS 向量库）
 - 混合检索（向量 + BM25 + 加权 RRF）
 - 降级策略（距离阈值，避免幻觉）
@@ -78,7 +82,7 @@ FastAPI（api_agent.py）
 - 异常处理（错误以 SSE 格式返回）
 - 请求日志（收到消息 + 耗时统计）
 - FAISS 索引持久化（避免重复 embedding）
-- Redis 缓存高频问题（省 Token）
+- Redis 缓存高频问题（省 Token，key 带 thread_id 防串台）
 - MySQL 持久化对话历史
 - RAG 评估（召回率 + 精确率 + MRR + 多样性）
 
@@ -300,6 +304,7 @@ def search_knowledge(query: str) -> str:
 | 多轮对话缓存串台 | 同一问题在不同上下文答案不同 | 缓存 key 加 thread_id：`chat:{thread_id}:{md5}` |
 | 无关问题触发幻觉 | 检索无相关内容时直接调 LLM | 距离阈值降级，返回"没找到"不调 LLM |
 | 单一评估指标误导 | 只看召回率无法区分策略 | 加精确率、MRR、多样性 |
+| InMemorySaver 重启丢记忆 | 记忆存在进程内存，服务重启清空 | 长期记忆从 MySQL 加载最近 N 轮历史 |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -426,7 +431,14 @@ result = await agent.ainvoke({...}, config=config)
 
 ### 12. Agent 多轮对话怎么实现？
 
-**方案**：`InMemorySaver` + `thread_id`。
+**两层记忆**：
+
+| 层 | 存储 | 特点 |
+|---|---|---|
+| 短期 | `InMemorySaver` | 进程内存，快，重启丢失 |
+| 长期 | MySQL | 持久化，重启后还能加载 |
+
+**短期记忆**：
 
 ```python
 from langgraph.checkpoint.memory import InMemorySaver
@@ -438,14 +450,40 @@ config = {"configurable": {"thread_id": "user_001"}}
 result = await agent.ainvoke({...}, config=config)
 ```
 
-**关键点**：
-- `InMemorySaver` 存内存，重启丢失；生产用 `RedisSaver` / `PostgresSaver`
-- `thread_id` 区分不同会话，相同 ID 共享历史
-- **缓存 key 必须带 thread_id**，否则不同会话会串台
+**长期记忆**（每次请求从 MySQL 加载最近 N 轮）：
+
+```python
+HISTORY_ROUNDS = 3
+
+def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
+    conn = pymysql.connect(...)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, content FROM conversations "
+                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
+                (thread_id, rounds * 2)
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [{"role": r, "content": c} for r, c in reversed(rows)]
+
+# 在接口里
+history = load_recent_history(thread_id)
+messages = history + [{"role": "user", "content": payload.message}]
+result = await agent.ainvoke({"messages": messages}, config=config)
+```
 
 **测试验证**：
 1. 同一 thread_id 问"它是什么" → 能理解上下文 ✅
-2. 换 thread_id 问"它是什么" → 无法理解 ✅
+2. **重启服务**后再问"它是什么" → 仍能理解 ✅（长期记忆生效）
+3. 换 thread_id 问"它是什么" → 无法理解 ✅（会话隔离）
+
+**生产优化**：`InMemorySaver` 换成 `RedisSaver`，或直接用 MySQL 加载历史。
+
+**面试话术**：
+> "我的记忆分两层：短期用 InMemorySaver 做单次会话加速，长期用 MySQL 按 thread_id 加载最近 3 轮历史。每次请求先把历史拼进 messages，再传给 Agent。这样即使服务重启，用户回来还能继续之前的对话。缓存 key 也带了 thread_id，避免不同会话串台。"
 
 ### 13. 检索不到内容怎么处理？
 
@@ -485,7 +523,34 @@ result = await agent.ainvoke({...}, config=config)
 **面试话术**：
 > "我评估 RAG 用了四个指标。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。实测发现精确率和多样性呈 trade-off：追求精确用相似度，需要多角度用 MMR+去重。MRR 三种策略都在 0.96 以上，Top-1 都很准。"
 
-### 15. 如果让你重做，会改什么？
+### 15. 长期记忆怎么实现？
+
+**方案**：每次请求从 MySQL 加载最近 N 轮历史，拼进 messages。
+
+```python
+HISTORY_ROUNDS = 3
+
+def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
+    # 从 MySQL 查最近 N*2 条（每轮 human + ai）
+    # 按时间正序返回
+    ...
+```
+
+**关键设计**：
+
+| 点 | 原因 |
+|---|---|
+| 限制轮数（3 轮） | 避免上下文爆炸 |
+| 正序返回 | 模型看到的时间线要正确 |
+| 每次实时加载 | MySQL 是权威数据源 |
+
+**验证**：
+- 重启服务后仍能理解"它指什么" → 长期记忆生效
+
+**面试话术**：
+> "长期记忆用 MySQL 实现。每次请求从 MySQL 加载最近 3 轮对话，拼进 messages 一起发给模型。这样即使服务重启、用户换设备，也能记得之前的对话。生产环境可以把短期记忆的 InMemorySaver 换成 RedisSaver，或者直接用 MySQL 加载历史，两种方案互补。"
+
+### 16. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - RAG 加 Rerank（bge-reranker-base）
@@ -505,7 +570,8 @@ result = await agent.ainvoke({...}, config=config)
 - RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
-- 多轮对话：InMemorySaver + thread_id（生产可换 RedisSaver）
+- **短期记忆：InMemorySaver**
+- **长期记忆：MySQL 加载最近 3 轮历史**
 - 缓存：Redis（TTL 3600 秒，key 带 thread_id）
 - 历史：MySQL（表 conversations）
 - 评估指标：召回率 / 精确率 / MRR / 多样性（30 个测试项）
@@ -519,12 +585,13 @@ result = await agent.ainvoke({...}, config=config)
 2. 测普通对话：POST /chat
 3. 测流式对话：POST /chat/stream
 4. 查看对话历史：GET /history?thread_id=user_001
-5. 演示多轮对话：同 thread_id 连续问"MMR 是什么" → "它和普通相似度有什么区别"
-6. 演示会话隔离：换 thread_id 问"它是什么"
-7. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
-8. 用浏览器打开 client.html，看打字机效果
-9. 展示 Docker 一键启动：docker compose up -d
-10. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+5. **演示短期记忆**：同 thread_id 连续问"MMR 是什么" → "它和普通相似度有什么区别"
+6. **演示长期记忆**：重启服务后再问"它和普通相似度有什么区别" → 仍能理解
+7. 演示会话隔离：换 thread_id 问"它是什么"
+8. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
+9. 用浏览器打开 client.html，看打字机效果
+10. 展示 Docker 一键启动：docker compose up -d
+11. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -593,7 +660,7 @@ result = await agent.ainvoke({...}, config=config)
 | 问题 | 解法 |
 |---|---|
 | 同一个问题反复问，每次调大模型浪费 Token | Redis 缓存回答 |
-| 服务重启后对话历史丢失 | MySQL 持久化 |
+| 服务重启后对话历史丢失 | MySQL 持久化 + 长期记忆加载 |
 | 多实例部署状态不一致 | MySQL + Redis 共享外部存储 |
 
 ### Redis 缓存实现
@@ -616,10 +683,6 @@ def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
 - key 格式：`chat:{thread_id}:{md5}`，**带 thread_id 防止多轮对话串台**
 - TTL 设 1 小时，过期自动清理
 - 命中缓存不调大模型，省 Token 也省时间
-
-**为什么缓存 key 要带 thread_id**：
-- 同一问题在不同上下文里答案可能不同
-- 不加 thread_id 会把会话 A 的答案给会话 B
 
 ### MySQL 对话历史实现
 
@@ -665,7 +728,9 @@ def save_conversation(thread_id: str, role: str, content: str):
     ↓
 Redis 查缓存（key 带 thread_id）
     ├── 命中 → 返回缓存 + 写 MySQL 历史
-    └── 未命中 → 调 Agent（带 thread_id 记忆） → 写 Redis 缓存 + 写 MySQL 历史 → 返回
+    └── 未命中 → 从 MySQL 加载最近 N 轮历史
+              → 拼进 messages → 调 Agent
+              → 写 Redis 缓存 + 写 MySQL 历史 → 返回
 ```
 
 ### 面试答题要点
@@ -674,6 +739,7 @@ Redis 查缓存（key 带 thread_id）
 |---|---|
 | 高频问题怎么优化？ | Redis 缓存，key 带 thread_id，TTL 一小时 |
 | 对话历史怎么持久化？ | MySQL 存，按 thread_id 分组 |
+| 长期记忆怎么实现？ | 每次请求从 MySQL 加载最近 N 轮，拼进 messages |
 | 多实例部署怎么共享状态？ | MySQL + Redis 都放外部，实例无状态 |
 | Redis 和 MySQL 区别？ | Redis 内存、快、适合缓存；MySQL 磁盘、持久、适合结构化数据 |
 | 限流怎么做？ | Redis `incr` + `expire`，每分钟超 N 次返回 429 |
@@ -897,100 +963,64 @@ async for chunk in agent.astream({...}, config=config, stream_mode="messages"):
 
 ### 9. 多轮对话记忆
 
-**问题**：Agent 默认没有记忆，每轮对话独立。用户问"它和普通相似度有什么区别"时，Agent 不知道"它"指什么。
-
-**方案**：用 `InMemorySaver` + `thread_id`。
-
-```python
-from langgraph.checkpoint.memory import InMemorySaver
-
-memory = InMemorySaver()
-
-agent = create_agent(
-    model,
-    tools=tools,
-    checkpointer=memory,      # 挂载记忆
-    system_prompt="..."
-)
-```
-
-请求时传 `thread_id`：
-
-```python
-config = {
-    "configurable": {"thread_id": thread_id},
-    "recursion_limit": RECURSION_LIMIT,
-}
-result = await agent.ainvoke({...}, config=config)
-```
-
-**关键点**：
-
-| 概念 | 作用 |
-|---|---|
-| `InMemorySaver` | 记忆存储位置（内存） |
-| `checkpointer=memory` | 把存储器挂到 Agent |
-| `thread_id` | 区分不同会话，相同 ID 共享历史 |
-
-**缓存 key 也要带 thread_id**：
-
-```python
-key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
-```
-
-因为同一个问题在不同上下文里答案可能不同，不加 thread_id 会导致不同会话串台。
-
-**测试验证**：
-1. `test_001` 问"MMR 是什么？" → 正常回答
-2. `test_001` 问"它和普通相似度检索有什么区别？" → 理解"它"指 MMR ✅
-3. `test_002` 问"它是什么？" → 不知道"它"指什么 ✅（会话隔离）
-
-**生产优化**：`InMemorySaver` 重启即丢，生产环境换 `RedisSaver` 或 `PostgresSaver`。
-
-**面试话术**：
-> "我用 InMemorySaver 做多轮对话记忆，通过 thread_id 区分不同会话。每次请求带 config 里的 thread_id，Agent 会自动加载该会话的历史消息作为上下文。同一个问题在不同会话里上下文不同，所以我的 Redis 缓存 key 也带了 thread_id，避免串台。生产环境会换成 RedisSaver 保证重启不丢。"
+（见第七部分第 12 题的"两层记忆"）
 
 ### 10. 降级策略（避免幻觉）
 
-**问题**：检索不到相关内容时，如果直接调 LLM，模型可能基于无关片段产生幻觉。
+（见第五部分 5.4 节）
 
-**方案**：在检索层加距离阈值，超过就返回"没找到"。
+### 11. 长期记忆（MySQL 历史加载）
+
+**问题**：`InMemorySaver` 是进程内存，服务重启后记忆丢失。用户昨天问过的问题，今天再问，Agent 不记得。
+
+**方案**：每次请求从 MySQL 加载最近 N 轮历史，拼进 messages。
 
 ```python
-MAX_DISTANCE = 1.1   # 向量 L2 距离阈值
+HISTORY_ROUNDS = 3   # 加载最近 3 轮
 
-def hybrid_search(query, k=3, max_distance=MAX_DISTANCE, ...):
-    vector_results_with_scores = vectorstore.similarity_search_with_score(query, k=k*3)
+def load_recent_history(thread_id: str, rounds: int = HISTORY_ROUNDS):
+    """加载最近 N 轮对话，按时间正序返回"""
+    conn = pymysql.connect(...)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, content FROM conversations "
+                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
+                (thread_id, rounds * 2)   # 每轮 = human + ai
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
 
-    if not vector_results_with_scores:
-        return []
-
-    best_distance = vector_results_with_scores[0][1]
-    if best_distance > max_distance:
-        return []
-
-    # 正常逻辑
-    ...
+    # 反转成时间正序
+    return [{"role": r, "content": c} for r, c in reversed(rows)]
 ```
 
-**阈值怎么定（实测数据）**：
+在 `/chat` 里：
 
-| 类别 | 距离范围 |
+```python
+history = load_recent_history(thread_id)
+messages = history + [{"role": "user", "content": payload.message}]
+result = await agent.ainvoke({"messages": messages}, config=config)
+```
+
+**关键设计**：
+
+| 点 | 原因 |
 |---|---|
-| 正常问题 | 0.58 ~ 0.89 |
-| 乱码 | 1.15 |
-| 无关问题 | 1.27 ~ 1.34 |
+| 限制轮数（`HISTORY_ROUNDS=3`） | 避免上下文爆炸 |
+| 正序返回 | 模型看到的时间线要正确 |
+| 每次请求实时加载 | MySQL 是权威数据源 |
 
-**选 1.1 的原因**：正常问题全过，无关问题全拦。
-
-**为什么用向量距离，不用 RRF 分数**：
-- RRF 分数范围窄（0.005~0.02），无法区分好坏
-- 向量 L2 距离直接反映语义相似度，范围 0~2，好判断
+**验证**：
+1. 第一轮问"MMR 是什么？" → `[长期记忆] 加载了 0 条历史消息`
+2. **重启服务**
+3. 第二轮问"它和普通相似度有什么区别？" → `[长期记忆] 加载了 2 条历史消息` + 能理解"它"
 
 **面试话术**：
-> "我在检索层加了降级策略。用相似度距离做阈值，超过阈值就返回'知识库中没有相关信息'，不调 LLM。这样避免模型在缺乏依据时产生幻觉。阈值是通过实测校准的，我测了正常问题和无关问题的距离分布，选了能分开两类的最优值。"
+> "我的记忆分两层：短期用 InMemorySaver，进程内存，重启丢失；长期用 MySQL，每次请求加载最近 3 轮历史拼进 messages。这样即使服务重启，用户回来还能继续之前的对话。生产环境可以把 InMemorySaver 换成 RedisSaver，或者直接用 MySQL 加载历史，两种方案互补。"
 
-### 11. 面试高频问题
+### 12. 面试高频问题
 
 | 问题 | 答案要点 |
 |---|---|
@@ -1001,7 +1031,8 @@ def hybrid_search(query, k=3, max_distance=MAX_DISTANCE, ...):
 | SSE 格式是什么？ | `data: 内容\n\n`，结束发 `[DONE]` |
 | MySQL 表怎么初始化？ | lifespan 里 `CREATE TABLE IF NOT EXISTS`，幂等自愈 |
 | Agent 死循环怎么防？ | `recursion_limit=10` + `max_tokens=2000` |
-| Agent 多轮对话怎么实现？ | InMemorySaver + thread_id，缓存 key 带 thread_id 防串台 |
+| Agent 多轮对话怎么实现？ | 短期 InMemorySaver + 长期 MySQL 加载，缓存 key 带 thread_id 防串台 |
+| 长期记忆怎么实现？ | 每次请求从 MySQL 加载最近 N 轮历史，拼进 messages |
 | 检索不到内容怎么处理？ | 距离阈值降级，返回"没找到"，不调 LLM |
 | RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 |
 
@@ -1152,5 +1183,6 @@ def evaluate_full(search_fn, name, k=3):
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
-- 多轮对话：InMemorySaver + thread_id，支持上下文理解
+- 短期记忆：InMemorySaver
+- 长期记忆：MySQL 加载最近 3 轮历史（HISTORY_ROUNDS=3）
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
