@@ -32,12 +32,16 @@ FastAPI（api_agent.py）
                    │ search_knowledge
                    ↓
     ┌─────────────────────────────────┐
-    │  混合检索：                       │
-    │  向量检索 Top-9  +  BM25 Top-9   │
-    │       ↓                          │
-    │  加权 RRF 合并（向量0.7+BM25 0.3）│
-    │       ↓                          │
-    │  Top-3 返回                       │
+    │  降级判断（距离阈值）              │
+    │       ↓ 通过                      │
+    │  混合检索：                        │
+    │  向量检索 Top-9  +  BM25 Top-9    │
+    │       ↓                           │
+    │  加权 RRF 合并（向量0.7+BM25 0.3） │
+    │       ↓                           │
+    │  Top-3 返回                        │
+    │                                    │
+    │  降级：距离超阈值 → 返回"没找到"    │
     └─────────────────────────────────┘
                    ↓
     检索结果返回给 Agent（循环第 ④ 步）
@@ -53,6 +57,7 @@ FastAPI（api_agent.py）
 | 模型 | DeepSeek（OpenAI 兼容协议） |
 | 工具协议 | MCP（FastMCP 3.4.7） |
 | 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF |
+| 降级 | 向量距离阈值（避免幻觉） |
 | 缓存 | Redis |
 | 历史 | MySQL |
 | 记忆 | InMemorySaver（多轮对话） |
@@ -65,6 +70,7 @@ FastAPI（api_agent.py）
 - 多轮对话（InMemorySaver + thread_id，支持上下文理解，缓存 key 带 thread_id 防串台）
 - RAG 检索增强（本地 embedding + FAISS 向量库）
 - 混合检索（向量 + BM25 + 加权 RRF）
+- **降级策略（距离阈值，避免幻觉）**
 - MCP 工具解耦（Agent 和工具分进程）
 - SSE 流式输出（打字机效果）
 - 中间步骤过滤（只输出最终回答）
@@ -221,6 +227,62 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 - 加权（0.7/0.3）：100% 召回率
 - **向量检索更可靠，给它更高权重**
 
+#### 5.4 降级策略（避免幻觉）
+
+**问题**：检索不到相关内容时，如果直接调 LLM，模型可能基于无关片段产生幻觉。
+
+**方案**：在检索层加距离阈值，超过就返回"没找到"。
+
+```python
+MAX_DISTANCE = 1.1   # 向量 L2 距离阈值
+
+def hybrid_search(query, k=3, max_distance=MAX_DISTANCE, ...):
+    vector_results_with_scores = vectorstore.similarity_search_with_score(query, k=k*3)
+
+    if not vector_results_with_scores:
+        return []
+
+    # 降级判断：最佳向量距离太大 → 认为知识库中无相关内容
+    best_distance = vector_results_with_scores[0][1]
+    if best_distance > max_distance:
+        return []
+
+    # 正常逻辑
+    ...
+```
+
+`search_knowledge` 工具处理空结果：
+
+```python
+@mcp.tool
+def search_knowledge(query: str) -> str:
+    results = hybrid_search(query, k=3)
+    if not results:
+        return "知识库中没有找到相关信息。"
+    return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
+```
+
+**阈值怎么定（实测数据）**：
+
+| 类别 | 问题 | 距离 |
+|---|---|---|
+| 正常 | MMR 是什么？ | 0.82 |
+| 正常 | RAG 完整流程 | 0.89 |
+| 正常 | Docker 怎么部署 | 0.58 |
+| 无关 | 今天天气 | 1.27 |
+| 无关 | 红烧肉 | 1.30 |
+| 无关 | 股市 | 1.34 |
+| 乱码 | asdfghjkl | 1.15 |
+
+**选 1.1 的原因**：
+- 正常问题最高 0.89，还有 0.21 余量
+- 乱码 1.15 也能被拦住
+- 无关问题 1.27+ 都被拦住
+
+**为什么用向量距离，不用 RRF 分数**：
+- RRF 分数范围窄（0.005~0.02），无法区分好坏
+- 向量 L2 距离直接反映语义相似度，范围 0~2，好判断
+
 ## 六、遇到的坑（面试重点）
 
 | 坑 | 原因 | 解决方案 |
@@ -236,6 +298,7 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 | MCP Server 里的 print 看不到 | MCP 协议占用 stdout | 改成输出到 stderr |
 | 等权混合检索反而变差 | RRF 奖励两路都出现的文档，BM25 判断错会被放大 | 加权 RRF（向量 0.7 / BM25 0.3） |
 | 多轮对话缓存串台 | 同一问题在不同上下文答案不同 | 缓存 key 加 thread_id：`chat:{thread_id}:{md5}` |
+| 无关问题触发幻觉 | 检索无相关内容时直接调 LLM | 距离阈值降级，返回"没找到"不调 LLM |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -257,9 +320,14 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 
 ### 3. 怎么防止 RAG 幻觉？
 
+**两层防护**：
+
+**第一层（Prompt 软约束）**：
 - Prompt 里加"只使用资料中的信息，不要编造"
-- 检索结果不够相关时，返回"知识库中没有相关信息"
-- 加 Rerank 二次排序
+
+**第二层（检索层硬降级）**：
+- 用向量距离做阈值，超过就返回"知识库中没有相关信息"
+- 不调 LLM，从根源上避免幻觉
 - 加评估集，量化回答准确率
 
 ### 4. InMemorySaver 和 PostgresSaver 区别？
@@ -378,7 +446,23 @@ result = await agent.ainvoke({...}, config=config)
 1. 同一 thread_id 问"它是什么" → 能理解上下文 ✅
 2. 换 thread_id 问"它是什么" → 无法理解 ✅
 
-### 13. 如果让你重做，会改什么？
+### 13. 检索不到内容怎么处理？
+
+**降级策略**：
+
+1. **检索层**：用向量距离做阈值（`MAX_DISTANCE = 1.1`），超过就返回空
+2. **工具层**：收到空结果时返回"知识库中没有找到相关信息"
+3. **不调 LLM**：从根源上避免模型基于无关片段产生幻觉
+
+**阈值怎么定**：
+- 实测正常问题距离 0.58~0.89
+- 实测无关问题距离 1.15~1.34
+- 选 1.1 能分开两类
+
+**面试话术**：
+> "我在检索层加了降级策略。用相似度距离做阈值，超过阈值就返回'知识库中没有相关信息'，不调 LLM。这样避免模型在缺乏依据时产生幻觉。阈值是通过实测校准的，我测了正常问题和无关问题的距离分布，选了能分开两类的最优值。"
+
+### 14. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - RAG 加 Rerank（bge-reranker-base）
@@ -396,6 +480,7 @@ result = await agent.ainvoke({...}, config=config)
 - 向量库：FAISS（本地持久化）
 - 检索策略：混合检索（向量 + BM25 + 加权 RRF）
 - RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
+- 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 多轮对话：InMemorySaver + thread_id（生产可换 RedisSaver）
 - 缓存：Redis（TTL 3600 秒，key 带 thread_id）
@@ -410,11 +495,12 @@ result = await agent.ainvoke({...}, config=config)
 2. 测普通对话：POST /chat
 3. 测流式对话：POST /chat/stream
 4. 查看对话历史：GET /history?thread_id=user_001
-5. **演示多轮对话**：同 thread_id 连续问"MMR 是什么" → "它和普通相似度有什么区别"
+5. 演示多轮对话：同 thread_id 连续问"MMR 是什么" → "它和普通相似度有什么区别"
 6. 演示会话隔离：换 thread_id 问"它是什么"
-7. 用浏览器打开 client.html，看打字机效果
-8. 展示 Docker 一键启动：docker compose up -d
-9. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+7. **演示降级策略**：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
+8. 用浏览器打开 client.html，看打字机效果
+9. 展示 Docker 一键启动：docker compose up -d
+10. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -838,7 +924,47 @@ key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
 **面试话术**：
 > "我用 InMemorySaver 做多轮对话记忆，通过 thread_id 区分不同会话。每次请求带 config 里的 thread_id，Agent 会自动加载该会话的历史消息作为上下文。同一个问题在不同会话里上下文不同，所以我的 Redis 缓存 key 也带了 thread_id，避免串台。生产环境会换成 RedisSaver 保证重启不丢。"
 
-### 10. 面试高频问题
+### 10. 降级策略（避免幻觉）
+
+**问题**：检索不到相关内容时，如果直接调 LLM，模型可能基于无关片段产生幻觉。
+
+**方案**：在检索层加距离阈值，超过就返回"没找到"。
+
+```python
+MAX_DISTANCE = 1.1   # 向量 L2 距离阈值
+
+def hybrid_search(query, k=3, max_distance=MAX_DISTANCE, ...):
+    vector_results_with_scores = vectorstore.similarity_search_with_score(query, k=k*3)
+
+    if not vector_results_with_scores:
+        return []
+
+    best_distance = vector_results_with_scores[0][1]
+    if best_distance > max_distance:
+        return []
+
+    # 正常逻辑
+    ...
+```
+
+**阈值怎么定（实测数据）**：
+
+| 类别 | 距离范围 |
+|---|---|
+| 正常问题 | 0.58 ~ 0.89 |
+| 乱码 | 1.15 |
+| 无关问题 | 1.27 ~ 1.34 |
+
+**选 1.1 的原因**：正常问题全过，无关问题全拦。
+
+**为什么用向量距离，不用 RRF 分数**：
+- RRF 分数范围窄（0.005~0.02），无法区分好坏
+- 向量 L2 距离直接反映语义相似度，范围 0~2，好判断
+
+**面试话术**：
+> "我在检索层加了降级策略。用相似度距离做阈值，超过阈值就返回'知识库中没有相关信息'，不调 LLM。这样避免模型在缺乏依据时产生幻觉。阈值是通过实测校准的，我测了正常问题和无关问题的距离分布，选了能分开两类的最优值。"
+
+### 11. 面试高频问题
 
 | 问题 | 答案要点 |
 |---|---|
@@ -850,6 +976,7 @@ key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
 | MySQL 表怎么初始化？ | lifespan 里 `CREATE TABLE IF NOT EXISTS`，幂等自愈 |
 | Agent 死循环怎么防？ | `recursion_limit=10` + `max_tokens=2000` |
 | Agent 多轮对话怎么实现？ | InMemorySaver + thread_id，缓存 key 带 thread_id 防串台 |
+| 检索不到内容怎么处理？ | 距离阈值降级，返回"没找到"，不调 LLM |
 
 ## 十三、RAG 评估（面试重点）
 
@@ -942,6 +1069,7 @@ def measure_diversity(search_fn, name, k=3):
 | 方案 | 原理 | 成本 |
 |---|---|---|
 | 混合检索 | 向量 + BM25，加权合并 | 中（已做） |
+| 降级策略 | 距离阈值拦截无关问题 | 低（已做） |
 | 查询改写 | LLM 把口语改写成术语 | 低 |
 | 文档增强 | 补充口语化同义表达 | 低 |
 | Rerank | 先粗排 Top-20，再精排 Top-3 | 中 |
@@ -972,6 +1100,7 @@ def measure_diversity(search_fn, name, k=3):
 - 等权混合检索：97%
 - 加权混合检索：100%
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
+- 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 多轮对话：InMemorySaver + thread_id，支持上下文理解
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
