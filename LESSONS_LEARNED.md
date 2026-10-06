@@ -17,6 +17,7 @@
 | 检索算法 | 故事 9、10 |
 | 生产级意识 | 故事 11、13 |
 | 功能演进回归 | 故事 12 |
+| 幻觉治理 | 故事 14 |
 
 ---
 
@@ -487,6 +488,59 @@ agent = create_agent(model, tools=tools, checkpointer=memory, ...)
 
 ---
 
+## 故事 14：检索不到内容怎么避免幻觉
+
+### 问题
+RAG 系统在知识库中找不到相关内容时，如果直接把不相关的片段塞给 LLM，模型可能基于这些片段产生幻觉，编造听起来合理的答案。
+
+### 分析
+- LLM 有"必须回答"的倾向，即使输入不相关
+- Prompt 里写"只使用资料中的信息"能缓解，但不能完全避免
+- **根本解法**：检索层先判断"有没有相关内容"，没有就不调 LLM
+
+### 方案
+在 `hybrid_search` 里加距离阈值：
+
+```python
+MAX_DISTANCE = 1.1
+
+def hybrid_search(query, k=3, max_distance=MAX_DISTANCE):
+    results_with_scores = vectorstore.similarity_search_with_score(query, k=k*3)
+    best_distance = results_with_scores[0][1]
+
+    if best_distance > max_distance:
+        return []   # 降级
+
+    # 正常 RRF 合并
+    ...
+```
+
+`search_knowledge` 工具处理空结果：
+
+```python
+if not results:
+    return "知识库中没有找到相关信息。"
+```
+
+### 阈值怎么定（实测数据）
+
+| 类别 | 距离范围 |
+|---|---|
+| 正常问题 | 0.58 ~ 0.89 |
+| 乱码 | 1.15 |
+| 无关问题 | 1.27 ~ 1.34 |
+
+**选 1.1**：正常问题全过，无关问题全拦。
+
+### 为什么用向量距离，不用 RRF 分数
+- RRF 分数范围窄（0.005~0.02），无法区分好坏
+- 向量 L2 距离直接反映语义相似度，范围 0~2，好判断
+
+### 收获
+**降级策略比"更好的 Prompt"更可靠。** Prompt 是软约束，模型可能不遵守；降级是硬约束，在代码层就拦住了。生产级 RAG 必须有两层防护：Prompt 防幻觉 + 检索层降级。
+
+---
+
 ## 总结
 
 这些坑覆盖了 Agent 开发中常见的几类问题：
@@ -503,5 +557,6 @@ agent = create_agent(model, tools=tools, checkpointer=memory, ...)
 | 检索算法 | 混合检索要调权重，MMR 是 chunk 级多样性 |
 | 生产级意识 | Agent 要有护栏，记忆要持久化 |
 | 功能演进回归 | 加新功能要检查旧设计的假设是否还成立 |
+| 幻觉治理 | Prompt 软约束 + 检索层硬降级，两层防护 |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**
