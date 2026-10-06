@@ -25,12 +25,12 @@ vectorstore = FAISS.load_local(str(INDEX_DIR), embedding, allow_dangerous_deseri
 with open(Path(__file__).resolve().parent / "test_set.json", encoding="utf-8") as f:
     test_set = json.load(f)
 
+# ===== 基础评估：召回率 =====
 def evaluate(search_fn, name, k=3):
     hit = 0
     for item in test_set:
         results = search_fn(item["question"], k)
         sources = [doc.metadata["source"] for doc in results]
-        # 只要期望文档有任意一个出现在结果里，就算命中
         if any(exp in sources for exp in item["expected_sources"]):
             hit += 1
         else:
@@ -39,7 +39,6 @@ def evaluate(search_fn, name, k=3):
     print(f"\n[{name}] 召回率：{hit}/{len(test_set)} = {recall:.0%}")
     return recall
 
-# 对比两种策略
 print("=== 评估：普通相似度检索 ===")
 evaluate(lambda q, k: vectorstore.similarity_search(q, k=k), "相似度")
 
@@ -60,7 +59,6 @@ def diverse_search(query, k=3):
                 break
     return diverse_results
 
-# 对比三种策略的多样性
 def measure_diversity(search_fn, name, k=3):
     total = 0
     for item in test_set:
@@ -71,7 +69,44 @@ def measure_diversity(search_fn, name, k=3):
     print(f"[{name}] 平均多样性：{avg:.2f} 个不同文档/查询")
     return avg
 
-print("=== 多样性对比（Top-3 里平均有几个不同文档）===")
+print("\n=== 多样性对比（Top-3 里平均有几个不同文档）===")
 measure_diversity(lambda q, k: vectorstore.similarity_search(q, k=k), "相似度")
 measure_diversity(lambda q, k: vectorstore.max_marginal_relevance_search(q, k=k, fetch_k=10), "MMR")
 measure_diversity(diverse_search, "MMR + 按来源去重")
+
+# ===== 完整评估：召回率 + 精确率 + MRR =====
+def evaluate_full(search_fn, name, k=3):
+    hit = 0
+    precision_sum = 0
+    mrr_sum = 0
+
+    for item in test_set:
+        results = search_fn(item["question"], k)
+        sources = [doc.metadata["source"] for doc in results]
+
+        # 召回率：期望文档有没有出现
+        if any(exp in sources for exp in item["expected_sources"]):
+            hit += 1
+
+        # 精确率：Top-k 里有多少是期望文档
+        if sources:
+            relevant = sum(1 for s in sources if s in item["expected_sources"])
+            precision_sum += relevant / len(sources)
+
+        # MRR：第一个正确结果的排名倒数
+        for rank, s in enumerate(sources, 1):
+            if s in item["expected_sources"]:
+                mrr_sum += 1 / rank
+                break
+
+    n = len(test_set)
+    print(f"\n[{name}]")
+    print(f"  召回率：{hit}/{n} = {hit/n:.0%}")
+    print(f"  精确率：{precision_sum/n:.2f}")
+    print(f"  MRR：{mrr_sum/n:.2f}")
+    return hit/n, precision_sum/n, mrr_sum/n
+
+print("\n\n=== 三种指标的完整评估 ===")
+evaluate_full(lambda q, k: vectorstore.similarity_search(q, k=k), "相似度")
+evaluate_full(lambda q, k: vectorstore.max_marginal_relevance_search(q, k=k, fetch_k=10), "MMR")
+evaluate_full(diverse_search, "MMR + 按来源去重")
