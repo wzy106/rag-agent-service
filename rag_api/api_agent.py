@@ -23,6 +23,7 @@ load_dotenv(env_path)
 # ===== 护栏配置 =====
 RECURSION_LIMIT = 10    # Agent 最大循环次数，超过自动终止
 MAX_TOKENS = 2000       # 单次输出最大 token 数
+HISTORY_ROUNDS = 3      # 长期记忆：加载最近 N 轮对话
 
 # ===== Redis 缓存 =====
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
@@ -51,6 +52,29 @@ def save_conversation(thread_id: str, role: str, content: str):
     finally:
         conn.close()
 
+def load_recent_history(thread_id: str, rounds: int = HISTORY_ROUNDS):
+    """加载最近 N 轮对话，按时间正序返回（用于拼进 messages）"""
+    conn = pymysql.connect(
+        host="localhost", port=3306, user="root",
+        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, content FROM conversations "
+                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
+                (thread_id, rounds * 2)   # 每轮 = human + ai
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    # SQL 查出来是最新在前，要反转为时间正序
+    history = []
+    for role, content in reversed(rows):
+        history.append({"role": role, "content": content})
+    return history
+
 def ensure_table():
     """启动时确保 conversations 表存在"""
     conn = pymysql.connect(
@@ -72,12 +96,11 @@ def ensure_table():
     finally:
         conn.close()
 
-# 全局 agent，lifespan 里初始化
+# 全局 agent
 agent = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用启动时加载 MCP 工具并创建 Agent"""
     global agent
     print("[启动] 正在连接 MCP Server...")
 
@@ -96,21 +119,19 @@ async def lifespan(app: FastAPI):
         api_key=os.getenv("DEEPSEEK_API_KEY"),
         base_url=os.getenv("DEEPSEEK_BASE_URL"),
         temperature=0,
-        max_tokens=MAX_TOKENS,   # 护栏：限制单次输出 token
+        max_tokens=MAX_TOKENS,
     )
 
-    # 多轮对话记忆（内存版，生产可换 RedisSaver / PostgresSaver）
     memory = InMemorySaver()
 
     agent = create_agent(
         model,
         tools=tools,
-        checkpointer=memory,     # 多轮对话：按 thread_id 保存历史
+        checkpointer=memory,
         system_prompt="你是一个知识助手，回答问题时优先调用 search_knowledge 工具查询知识库。"
     )
-    print(f"[启动] Agent 创建完成（多轮记忆 + 护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}）")
+    print(f"[启动] Agent 创建完成（护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}, 历史轮数={HISTORY_ROUNDS}）")
 
-    # 确保 MySQL 表存在
     ensure_table()
     print("[启动] MySQL 表检查完成")
 
@@ -129,7 +150,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
-    thread_id: str = "user_001"     # 新增：会话 ID，默认 user_001
+    thread_id: str = "user_001"
 
 class ChatResponse(BaseModel):
     reply: str
@@ -142,7 +163,7 @@ def root():
 async def chat(payload: ChatRequest):
     thread_id = payload.thread_id
 
-    # 1. 先查缓存（缓存 key 带 thread_id）
+    # 1. 先查缓存
     cached = get_cached(thread_id, payload.message)
     if cached:
         print(f"[缓存命中] {payload.message}")
@@ -150,18 +171,22 @@ async def chat(payload: ChatRequest):
         save_conversation(thread_id, "ai", cached)
         return ChatResponse(reply=cached)
 
-    # 2. 缓存未命中，调 Agent（带护栏 + thread_id）
+    # 2. 加载长期记忆（MySQL 最近 N 轮）
+    history = load_recent_history(thread_id)
+    print(f"[长期记忆] 加载了 {len(history)} 条历史消息")
+
+    # 3. 拼 messages：历史 + 本次问题
+    messages = history + [{"role": "user", "content": payload.message}]
+
+    # 4. 调 Agent
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": RECURSION_LIMIT,
     }
-    result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": payload.message}]},
-        config=config
-    )
+    result = await agent.ainvoke({"messages": messages}, config=config)
     answer = result["messages"][-1].content
 
-    # 3. 写缓存 + 存历史
+    # 5. 写缓存 + 存历史
     set_cache(thread_id, payload.message, answer)
     save_conversation(thread_id, "human", payload.message)
     save_conversation(thread_id, "ai", answer)
@@ -195,7 +220,7 @@ def get_history(thread_id: str = "user_001", limit: int = 20):
 
 class StreamRequest(BaseModel):
     message: str
-    thread_id: str = "user_001"     # 新增
+    thread_id: str = "user_001"
 
 @app.post("/chat/stream")
 async def chat_stream(payload: StreamRequest):
@@ -208,15 +233,21 @@ async def chat_stream(payload: StreamRequest):
             saw_tool = False
             pending = []
             started = False
+            full_answer = ""
 
-            # 护栏 + thread_id
+            # 加载长期记忆
+            history = load_recent_history(thread_id)
+            print(f"[长期记忆] 加载了 {len(history)} 条历史消息")
+
+            messages = history + [{"role": "user", "content": payload.message}]
+
             config = {
                 "configurable": {"thread_id": thread_id},
                 "recursion_limit": RECURSION_LIMIT,
             }
 
             async for chunk in agent.astream(
-                {"messages": [{"role": "user", "content": payload.message}]},
+                {"messages": messages},
                 config=config,
                 stream_mode="messages"
             ):
@@ -229,6 +260,7 @@ async def chat_stream(payload: StreamRequest):
                     continue
                 if saw_tool:
                     yield f"data: {json.dumps({'text': msg_chunk.content}, ensure_ascii=False)}\n\n"
+                    full_answer += msg_chunk.content
                     started = True
                 else:
                     pending.append(msg_chunk.content)
@@ -236,6 +268,11 @@ async def chat_stream(payload: StreamRequest):
             if not started and pending:
                 for text in pending:
                     yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
+                    full_answer += text
+
+            # 流式结束后存历史
+            save_conversation(thread_id, "human", payload.message)
+            save_conversation(thread_id, "ai", full_answer)
 
         except Exception as e:
             yield f"data: {json.dumps({'error': f'服务出错了：{str(e)}'}, ensure_ascii=False)}\n\n"
