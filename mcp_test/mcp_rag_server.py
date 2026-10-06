@@ -58,10 +58,27 @@ tokenized_corpus = [list(jieba.cut(doc.page_content)) for doc in all_docs]
 bm25 = BM25Okapi(tokenized_corpus)
 print(f"[RAG Server] BM25 索引构建完成，{len(all_docs)} 个 chunk", file=sys.stderr)
 
-# ===== 混合检索函数 =====
-def hybrid_search(query, k=3, rrf_k=60, vector_weight=0.7, bm25_weight=0.3):
-    # 向量检索
-    vector_results = vectorstore.similarity_search(query, k=k*3)
+# ===== 降级阈值 =====
+MAX_DISTANCE = 1.1   # 向量 L2 距离阈值，超过认为不相关（bge 归一化后范围 0~2）
+
+# ===== 混合检索函数（含降级策略） =====
+def hybrid_search(query, k=3, rrf_k=60, vector_weight=0.7, bm25_weight=0.3, max_distance=MAX_DISTANCE):
+    # 向量检索（带距离分数）
+    vector_results_with_scores = vectorstore.similarity_search_with_score(query, k=k*3)
+
+    if not vector_results_with_scores:
+        return []
+
+    # 降级判断：最佳向量距离太大 → 认为知识库中无相关内容
+    best_distance = vector_results_with_scores[0][1]
+    print(f"[RAG] 最佳向量距离: {best_distance:.4f}", file=sys.stderr)
+
+    if best_distance > max_distance:
+        print(f"[RAG] 降级触发（距离 {best_distance:.4f} > {max_distance}）", file=sys.stderr)
+        return []
+
+    # 拆出文档
+    vector_results = [doc for doc, _ in vector_results_with_scores]
     vector_ranks = {doc.page_content: i for i, doc in enumerate(vector_results)}
 
     # BM25 检索
@@ -92,6 +109,11 @@ mcp = FastMCP("RAG Knowledge Server")
 def search_knowledge(query: str) -> str:
     """从知识库中检索与问题相关的信息，返回最相关的文档片段。"""
     results = hybrid_search(query, k=3)
+
+    # 降级：没有相关结果
+    if not results:
+        return "知识库中没有找到相关信息。"
+
     return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
 
 if __name__ == "__main__":
