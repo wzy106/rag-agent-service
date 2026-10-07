@@ -21,6 +21,8 @@
 | 评估方法 | 故事 15 |
 | 记忆持久化 | 故事 13、16 |
 | 架构重构 | 故事 17 |
+| 安全防护 | 故事 18 |
+| 缓存正确性 | 故事 19 |
 
 ---
 
@@ -230,6 +232,9 @@ async for chunk in agent.astream(...):
 
 ### 收获
 流式接口需要区分"内部过程"和"用户可见内容"，不能简单地把所有 token 都转发。
+
+### 已知不足
+如果模型在工具调用后不再输出文本（比如工具结果直接就是答案），`started` 永远是 False，只发 `[DONE]`，用户看到空白。**加兜底**：`if not started and not pending: yield fallback`。
 
 ---
 
@@ -444,7 +449,7 @@ def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
 **加新功能时，要检查它是否影响已有设计的假设。** 加多轮对话前，"同一 query 同一答案"是成立的；加了之后这个假设不成立，缓存设计就要跟着改。这是**功能演进引发的设计回归**。
 
 ### 已知不足
-缓存 key 仍然不含 history hash。同一个问题在第 1 轮和第 5 轮上下文不同，答案应该不同，但会命中同一个缓存。生产环境应该把 history hash 也加进 key。
+见故事 19。
 
 ---
 
@@ -735,6 +740,191 @@ result = await agent.ainvoke({"messages": messages}, config=config)
 
 ---
 
+## 故事 18：错误信息泄漏（安全防护）
+
+### 问题
+最初在流式接口的异常处理里，直接把异常字符串返回给客户端：
+
+```python
+except Exception as e:
+    yield f"data: {json.dumps({'error': f'服务出错了：{str(e)}'})}\n\n"
+```
+
+**这有安全隐患**：`str(e)` 可能包含 API key、文件路径、SQL 结构、内部 IP 等敏感信息。
+
+### 分析
+- 异常堆栈通常包含**上游服务返回的原文**，比如 `Authentication Fails, Your api key: ****0cb1 is invalid`
+- 如果直接给客户端，攻击者能通过报错探测系统结构
+- 比如 `Connection refused to 10.0.1.5:3306` 暴露内网 IP
+- 比如 SQL 语法错误暴露表结构和字段名
+
+### 方案
+**服务端记录完整异常，客户端只看到友好提示。**
+
+```python
+def friendly_error(e: Exception) -> str:
+    """把异常映射成用户可读的提示，不泄漏内部信息"""
+    msg = str(e).lower()
+    if "authentication" in msg or "401" in msg or "api key" in msg:
+        return "模型服务认证失败，请联系管理员"
+    if "timeout" in msg or "timed out" in msg:
+        return "请求超时，请稍后再试"
+    if "rate" in msg or "429" in msg:
+        return "请求过于频繁，请稍后再试"
+    if "connection" in msg or "connect" in msg:
+        return "服务暂时不可用，请稍后再试"
+    return "服务暂时不可用，请稍后再试"
+```
+
+在接口里：
+
+```python
+try:
+    ...
+except Exception as e:
+    # 服务端记录完整异常（含堆栈），方便排查
+    print(f"[错误] {type(e).__name__}: {str(e)}")
+    # 客户端只看到友好提示
+    raise HTTPException(status_code=500, detail=friendly_error(e))
+```
+
+流式接口里：
+
+```python
+except Exception as e:
+    print(f"[错误] {type(e).__name__}: {str(e)}")
+    yield f"data: {json.dumps({'error': friendly_error(e)}, ensure_ascii=False)}\n\n"
+```
+
+### 为什么这么选
+- **安全**：不泄漏 API key、内网 IP、SQL 结构等
+- **用户体验**：客户端拿到的是人话，不是 Python 堆栈
+- **可排查**：服务端日志保留完整信息，运维能定位问题
+
+### 收获
+**生产环境的异常处理必须分层**：
+- **服务端日志**：完整异常 + 堆栈，方便排查
+- **客户端响应**：映射后的友好提示，不泄漏内部信息
+
+这和"日志分级"是同一个思路：**详细信息和用户可见信息必须分开。**
+
+---
+
+## 故事 19：缓存 key 不含上下文（缓存正确性）
+
+### 问题
+在加了多轮对话后，缓存 key 只按 `thread_id + query` 组成：
+
+```python
+key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
+```
+
+看起来解决了会话隔离问题，但**仍有一个正确性 bug**：
+
+**场景**：
+```text
+第 1 轮：用户问 "MMR 是什么？" → 答案 A → 缓存 key = chat:user1:abc123
+第 2 轮：用户问 "它和普通相似度有什么区别？" → 答案 B
+第 3 轮：用户又问 "MMR 是什么？"
+        → 命中缓存 key chat:user1:abc123 → 返回答案 A
+        → 但此时上下文变了（多了第 2 轮），答案应该不一样
+```
+
+**根因**：`context_version`（上下文版本）没进 key，同一个 query 在不同上下文里命中同一缓存。
+
+### 分析
+- 多轮对话下，**答案依赖上下文**，不只是 query
+- 上下文变了（新增了对话历史），同样的 query 应该重新生成
+- 只按 query 做 key，等于假设"同一问题答案永远一样"，这个假设在**多轮对话**下不成立
+- 这和故事 12（串台问题）是**同一类问题的不同表现**：
+  - 故事 12：跨会话串台，靠 `thread_id` 解决
+  - 故事 19：同会话上下文错配，靠 `context_version` 解决
+
+### 方案
+把**上下文版本号**也加进 key：
+
+```python
+def get_context_version(thread_id: str) -> int:
+    """
+    获取该会话的上下文版本号（= MySQL 里的消息数）。
+    同一个问题在不同上下文里答案可能不同，所以缓存 key 必须带版本号。
+    """
+    conn = pymysql.connect(...)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM conversations WHERE thread_id = %s",
+                (thread_id,)
+            )
+            count = cur.fetchone()[0]
+    finally:
+        conn.close()
+    return count
+
+def get_cached(thread_id: str, query: str, context_version: int):
+    key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
+    return r.get(key)
+
+def set_cache(thread_id: str, query: str, answer: str, context_version: int, ttl: int = 3600):
+    key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
+    r.set(key, answer, ex=ttl)
+```
+
+在接口里：
+
+```python
+# 1. 查缓存（key 带上下文版本号）
+context_version = get_context_version(thread_id)
+cached = get_cached(thread_id, payload.message, context_version)
+if cached:
+    return ChatResponse(reply=cached)
+
+# 2. 调 Agent
+...
+
+# 3. 写缓存（用当前 version）
+set_cache(thread_id, payload.message, answer, context_version)
+```
+
+**缓存 key 四段结构**：
+
+| 段 | 作用 |
+|---|---|
+| `chat:` | 命名空间隔离 |
+| `thread_id` | 防止跨会话串台 |
+| `v{context_version}` | 防止同会话上下文错配 |
+| `{md5}` | query 的 MD5 |
+
+### 实测验证
+
+```text
+第一次：[缓存写入] MMR 是什么？ (v0)
+第二次：[缓存写入] MMR 是什么？ (v2)   ← 版本变了，缓存没命中
+```
+
+第二次问同一个问题，因为 `context_version` 从 `v0` 变成 `v2`，**缓存 key 不一样，所以没命中，重新调了 Agent**。
+
+### 为什么这么做
+- **正确性优先**：RAG 系统不能返回错误答案，缓存命中率下降是可接受的
+- **简单可靠**：用消息数作为版本号，不需要额外维护状态
+- **可扩展**：如果将来 prompt 变了，可以再加一个 prompt 版本号
+
+### 代价
+- 缓存命中率下降（因为按会话+版本分桶）
+- 但 RAG 场景下，用户极少在**完全相同的上下文里**问同一个问题
+- 从"错误命中"到"正确重新生成"，是值得的
+
+### 收获
+**缓存设计要跟着数据模型演进。** 从单轮对话到多轮对话，缓存的假设从"query → 答案"变成"query + context → 答案"。**假设变了，key 的结构就要跟着改。**
+
+这也是**功能演进引发设计回归**的又一个例子（和故事 12 同一个家族）：
+- 加多轮对话 → 故事 12 发现串台 → 加 thread_id
+- 加多轮对话 → 故事 19 发现上下文错配 → 加 context_version
+
+**每次加功能，都要回头检查一遍所有的假设。**
+
+---
+
 ## 总结
 
 这些坑覆盖了 Agent 开发中常见的几类问题：
@@ -755,5 +945,7 @@ result = await agent.ainvoke({"messages": messages}, config=config)
 | 评估方法 | 单一指标会误导，要多个指标一起看 |
 | 记忆持久化 | 让 checkpointer 管历史，不要在框架外面手动糊一层 |
 | 架构重构 | 发现职责重叠就统一到单一真相源 |
+| 安全防护 | 服务端日志记详细，客户端响应给友好提示 |
+| 缓存正确性 | 缓存的 key 要覆盖所有影响答案的维度 |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**
