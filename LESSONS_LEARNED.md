@@ -15,11 +15,12 @@
 | 构建优化 | 故事 7 |
 | 协议理解 | 故事 8 |
 | 检索算法 | 故事 9、10 |
-| 生产级意识 | 故事 11、13 |
+| 生产级意识 | 故事 11 |
 | 功能演进回归 | 故事 12 |
 | 幻觉治理 | 故事 14 |
 | 评估方法 | 故事 15 |
-| 记忆持久化 | 故事 16 |
+| 记忆持久化 | 故事 13、16 |
+| 架构重构 | 故事 17 |
 
 ---
 
@@ -442,6 +443,9 @@ def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
 ### 收获
 **加新功能时，要检查它是否影响已有设计的假设。** 加多轮对话前，"同一 query 同一答案"是成立的；加了之后这个假设不成立，缓存设计就要跟着改。这是**功能演进引发的设计回归**。
 
+### 已知不足
+缓存 key 仍然不含 history hash。同一个问题在第 1 轮和第 5 轮上下文不同，答案应该不同，但会命中同一个缓存。生产环境应该把 history hash 也加进 key。
+
 ---
 
 ## 故事 13：InMemorySaver 的局限
@@ -461,32 +465,37 @@ def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
 
 | 方案 | 特点 |
 |---|---|
-| `RedisSaver` | 存 Redis，快，适合已有 Redis 的项目 |
-| `PostgresSaver` | 存 PostgreSQL，官方推荐，功能全 |
-| `SQLiteSaver` | 存本地文件，轻量，适合单机 |
+| `AsyncSqliteSaver` | 存本地 SQLite 文件，轻量，适合单机 |
+| `AsyncPostgresSaver` | 存 PostgreSQL，官方推荐，多实例共享 |
+| `AsyncRedisSaver` | 存 Redis，快，适合已有 Redis 的项目 |
 
-改动很小，只需换 `checkpointer` 参数：
+改动很小，只需换 `checkpointer` 和导入：
 
 ```python
 # 开发
 from langgraph.checkpoint.memory import InMemorySaver
 memory = InMemorySaver()
 
-# 生产
-from langgraph.checkpoint.redis import RedisSaver
-memory = RedisSaver(redis_url="redis://localhost:6379")
+# 单机部署
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+async with AsyncSqliteSaver.from_conn_string("checkpoints.db") as saver:
+    agent = create_agent(model, tools=tools, checkpointer=saver, ...)
 
-# 用法完全一样
-agent = create_agent(model, tools=tools, checkpointer=memory, ...)
+# 生产
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+async with AsyncPostgresSaver.from_conn_string("postgresql://...") as saver:
+    agent = create_agent(model, tools=tools, checkpointer=saver, ...)
 ```
+
+**接口完全一致**，业务代码不用改。
 
 ### 为什么这么选
 - **开发用 InMemorySaver**：零配置，跑起来就行
-- **生产用 RedisSaver**：项目已有 Redis，复用基础设施
-- **PostgresSaver 备选**：如果项目用 PG 且需要更强的持久化保证
+- **单机部署用 AsyncSqliteSaver**：一个文件搞定，重启不丢
+- **生产用 AsyncPostgresSaver**：多实例共享，高可用
 
 ### 收获
-**开发和生产的技术选型经常不同。** 开发追求"跑得快、配得少"；生产追求"稳、持久、可扩展"。面试时能说清"我用 InMemorySaver 开发，生产会换 RedisSaver"，比只会用一个方案强得多。
+**开发和生产的技术选型经常不同。** 开发追求"跑得快、配得少"；生产追求"稳、持久、可扩展"。面试时能说清"我用 InMemorySaver 开发，单机用 AsyncSqliteSaver，生产会换 AsyncPostgresSaver"，比只会用一个方案强得多。
 
 ---
 
@@ -540,6 +549,9 @@ if not results:
 
 ### 收获
 **降级策略比"更好的 Prompt"更可靠。** Prompt 是软约束，模型可能不遵守；降级是硬约束，在代码层就拦住了。生产级 RAG 必须有两层防护：Prompt 防幻觉 + 检索层降级。
+
+### 已知不足
+`MAX_DISTANCE = 1.1` 的校准实验不够系统。应该对正样本和负样本分别统计 best_distance 分布，取分离点，画出 PR 曲线。
 
 ---
 
@@ -604,6 +616,11 @@ def evaluate_full(search_fn, name, k=3):
 ### 收获
 **单一指标会误导。** 只看召回率以为三种策略一样好，加上精确率和多样性才看出它们的 trade-off。**评估 RAG 要多个指标一起看。**
 
+### 已知不足
+- **文档级召回而非 chunk 级**：用 `source`（文件名）判断命中，只有两三篇文档，命中太容易，含金量不高。生产环境应该标注 chunk id 或关键句。
+- **30 条样本太少**：3% 的差异（97% vs 93%）是一条样本的差别，统计上无意义。应该扩到 200 条以上。
+- **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness。
+
 ---
 
 ## 故事 16：InMemorySaver 重启丢记忆
@@ -617,51 +634,104 @@ def evaluate_full(search_fn, name, k=3):
 - 用户回来问"它是什么"，Agent 完全不知道上下文
 
 ### 方案
-**两层记忆**：
-
-| 层 | 存储 | 作用 |
-|---|---|---|
-| 短期 | `InMemorySaver` | 单次会话内多轮，快 |
-| 长期 | MySQL | 跨会话持久化，不怕重启 |
-
-每次请求，先从 MySQL 加载最近 N 轮历史，拼进 messages：
+把 `InMemorySaver` 换成 **`AsyncSqliteSaver`**，让 LangGraph 的 checkpointer 直接做持久化。
 
 ```python
-HISTORY_ROUNDS = 3
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
-    conn = pymysql.connect(...)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT role, content FROM conversations "
-                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
-                (thread_id, rounds * 2)
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global agent
+    checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+    async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+        agent = create_agent(
+            model, tools=tools,
+            checkpointer=saver,   # 持久化 saver
+            system_prompt="..."
+        )
+        yield
+```
 
-    return [{"role": r, "content": c} for r, c in reversed(rows)]
+调用时只传当前问题，**不手动拼历史**：
 
-# 在接口里
-history = load_recent_history(thread_id)
-messages = history + [{"role": "user", "content": payload.message}]
-result = await agent.ainvoke({"messages": messages}, config=config)
+```python
+config = {"configurable": {"thread_id": thread_id}}
+result = await agent.ainvoke(
+    {"messages": [{"role": "user", "content": payload.message}]},
+    config=config
+)
 ```
 
 ### 关键设计
-- **限制轮数**（3 轮）：避免上下文爆炸
-- **正序返回**：模型看到的时间线要正确
-- **每次实时加载**：MySQL 是权威数据源
+- **checkpointer 管历史**：Agent 自动从 SQLite 按 thread_id 加载
+- **只传当前一轮**：不手动拼 `history + [当前问题]`
+- **`async with` 包裹**：保证服务停止时正确关闭 SQLite 连接
 
 ### 验证
-1. 第一轮问 MMR → `[长期记忆] 加载了 0 条历史消息`
+1. 第一轮问"MMR 是什么？"
 2. **重启服务**
-3. 第二轮问"它和普通相似度有什么区别？" → `[长期记忆] 加载了 2 条历史消息` + 能理解"它" ✅
+3. 第二轮问"它和普通相似度有什么区别？" → 仍能理解"它" ✅
 
 ### 收获
-**开发用 InMemorySaver，生产用持久化方案。** 不是替代关系，是互补关系。InMemorySaver 快但易失，MySQL 慢但持久。生产系统往往两者都用：MySQL 存历史，InMemorySaver 做单次会话加速。
+**让框架做框架的事。** LangGraph 的 checkpointer 就是设计来管状态的，不要在外面手动糊一层。生产环境可以无缝升级到 `AsyncPostgresSaver`，业务代码完全不用改。
+
+---
+
+## 故事 17：双源记忆打架（架构重构）
+
+### 问题
+在故事 16 之前，我用的是"两层记忆"方案：短期 `InMemorySaver` + 长期 MySQL 手动加载。看起来很美，但**两个源会打架**。
+
+### 分析
+代码里同时有：
+
+```python
+memory = InMemorySaver()                          # 源 1：LangGraph checkpointer
+history = load_recent_history(thread_id)          # 源 2：MySQL 手动加载
+messages = history + [{"role": "user", ...}]      # 源 3：手动拼 messages
+result = await agent.ainvoke({"messages": messages}, config=config)
+```
+
+**三个具体问题**：
+
+**问题 A：消息格式混用**
+- `InMemorySaver` 存的是 LangChain 的 `HumanMessage`/`AIMessage` 对象
+- 手动拼的是 OpenAI 的 `{"role": "user"}` dict
+- 两种格式在 state 里混着
+
+**问题 B：历史重复累积**
+- `InMemorySaver` 已经在按 `thread_id` 累积 state
+- 传入的 messages 会再叠加一遍（取决于 reducer 实现）
+
+**问题 C：消息对不完整**
+- `LIMIT rounds*2` 可能把 `AIMessage(tool_calls=...)` 和对应的 `ToolMessage` 截断
+- OpenAI 协议要求 `tool_calls` 和 `tool_call_id` 必须成对出现
+- 这种 state 在下次请求时可能直接触发 400
+
+### 方案
+**统一到 LangGraph 的 checkpointer 做唯一真相源**，MySQL 降级为展示层。
+
+| 角色 | 之前 | 之后 |
+|---|---|---|
+| 记忆源 | InMemorySaver + MySQL 手动拼 | **AsyncSqliteSaver（唯一真相源）** |
+| MySQL | 记忆源 | **展示层**（给 /history 用） |
+| 消息格式 | OpenAI dict 手动拼 | 统一交给 LangGraph |
+| 手动加载历史 | ✅ 有 | ❌ 没有 |
+
+**代码改动**：
+1. `InMemorySaver` → `AsyncSqliteSaver`
+2. 删掉 `load_recent_history` 函数
+3. `/chat` 和 `/chat/stream` 只传 `{"messages": [{"role": "user", ...}]}`
+
+### 为什么这么选
+- **单一真相源**：一份历史只由一个组件管，不打架
+- **符合框架意图**：LangGraph 的 checkpointer 就是干这个的
+- **可平滑升级**：Sqlite → Postgres → Redis，接口不变
+
+### 收获
+**架构问题比功能 bug 更值得重视。** "两个源同时管历史"看起来能用，但埋着消息格式混用、历史重复、协议违规等隐患。**一旦发现职责重叠，就要立即统一到单一真相源。**
+
+这也印证了一个原则：**让框架做框架的事。** 不要因为"我能自己写"就在外面糊一层，那只会让架构越来越乱。
 
 ---
 
@@ -683,6 +753,7 @@ result = await agent.ainvoke({"messages": messages}, config=config)
 | 功能演进回归 | 加新功能要检查旧设计的假设是否还成立 |
 | 幻觉治理 | Prompt 软约束 + 检索层硬降级，两层防护 |
 | 评估方法 | 单一指标会误导，要多个指标一起看 |
-| 记忆持久化 | 短期 InMemorySaver + 长期 MySQL，两层互补 |
+| 记忆持久化 | 让 checkpointer 管历史，不要在框架外面手动糊一层 |
+| 架构重构 | 发现职责重叠就统一到单一真相源 |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**
