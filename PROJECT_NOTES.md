@@ -49,8 +49,9 @@ FastAPI（api_agent.py）
 客户端
 
 记忆层：
-- 短期：InMemorySaver（进程内存，单次会话加速）
-- 长期：MySQL（按 thread_id 加载最近 3 轮历史）
+- LangGraph checkpointer 按 thread_id 管状态（唯一真相源）
+- AsyncSqliteSaver 持久化到 SQLite 文件（重启不丢）
+- MySQL 只做展示层（给 /history 接口用）
 ```
 
 ## 三、技术栈
@@ -63,15 +64,15 @@ FastAPI（api_agent.py）
 | 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF |
 | 降级 | 向量距离阈值（避免幻觉） |
 | 缓存 | Redis |
-| 历史 | MySQL |
-| 记忆 | InMemorySaver（短期）+ MySQL（长期） |
+| 记忆持久化 | AsyncSqliteSaver（生产可换 PostgresSaver） |
+| 展示层 | MySQL（对话历史，只读） |
 | 服务 | FastAPI + Uvicorn |
 | 部署 | Docker + Docker Compose |
 | 流式 | SSE（Server-Sent Events） |
 
 ## 四、核心功能
 
-- **两层记忆**：短期 InMemorySaver + 长期 MySQL 历史加载（重启后仍记得上下文）
+- **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启不丢
 - RAG 检索增强（本地 embedding + FAISS 向量库）
 - 混合检索（向量 + BM25 + 加权 RRF）
 - 降级策略（距离阈值，避免幻觉）
@@ -83,7 +84,7 @@ FastAPI（api_agent.py）
 - 请求日志（收到消息 + 耗时统计）
 - FAISS 索引持久化（避免重复 embedding）
 - Redis 缓存高频问题（省 Token，key 带 thread_id 防串台）
-- MySQL 持久化对话历史
+- MySQL 持久化对话历史（展示层）
 - RAG 评估（召回率 + 精确率 + MRR + 多样性）
 
 ## 五、RAG 完整链路（面试重点）
@@ -304,7 +305,7 @@ def search_knowledge(query: str) -> str:
 | 多轮对话缓存串台 | 同一问题在不同上下文答案不同 | 缓存 key 加 thread_id：`chat:{thread_id}:{md5}` |
 | 无关问题触发幻觉 | 检索无相关内容时直接调 LLM | 距离阈值降级，返回"没找到"不调 LLM |
 | 单一评估指标误导 | 只看召回率无法区分策略 | 加精确率、MRR、多样性 |
-| InMemorySaver 重启丢记忆 | 记忆存在进程内存，服务重启清空 | 长期记忆从 MySQL 加载最近 N 轮历史 |
+| **双源记忆打架** | InMemorySaver + MySQL 手动拼历史，消息格式混用、历史重复累积 | **统一到 LangGraph checkpointer（AsyncSqliteSaver），MySQL 只做展示层** |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -340,6 +341,7 @@ def search_knowledge(query: str) -> str:
 
 - InMemorySaver：存内存，进程结束即丢失，适合开发测试
 - PostgresSaver：存数据库，持久化，多实例共享，适合生产
+- **本项目用 AsyncSqliteSaver**：存 SQLite 文件，持久化，单机部署方便
 
 ### 5. 流式输出怎么实现的？
 
@@ -431,59 +433,58 @@ result = await agent.ainvoke({...}, config=config)
 
 ### 12. Agent 多轮对话怎么实现？
 
-**两层记忆**：
-
-| 层 | 存储 | 特点 |
-|---|---|---|
-| 短期 | `InMemorySaver` | 进程内存，快，重启丢失 |
-| 长期 | MySQL | 持久化，重启后还能加载 |
-
-**短期记忆**：
+**方案**：LangGraph checkpointer + thread_id。
 
 ```python
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-memory = InMemorySaver()
-agent = create_agent(model, tools=tools, checkpointer=memory, ...)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global agent
+    checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+    async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+        agent = create_agent(
+            model, tools=tools,
+            checkpointer=saver,
+            system_prompt="..."
+        )
+        yield
 
-config = {"configurable": {"thread_id": "user_001"}}
-result = await agent.ainvoke({...}, config=config)
+# 调用
+config = {"configurable": {"thread_id": thread_id}}
+result = await agent.ainvoke(
+    {"messages": [{"role": "user", "content": payload.message}]},
+    config=config
+)
 ```
 
-**长期记忆**（每次请求从 MySQL 加载最近 N 轮）：
+**关键点**：
+
+| 概念 | 作用 |
+|---|---|
+| `AsyncSqliteSaver` | 持久化 checkpointer，存 SQLite 文件 |
+| `checkpointer=saver` | 把存储器挂到 Agent |
+| `thread_id` | 区分不同会话，相同 ID 共享历史 |
+
+**只需要传当前这一轮的消息**，Agent 会自动从 checkpointer 加载历史。
+
+**缓存 key 也要带 thread_id**：
 
 ```python
-HISTORY_ROUNDS = 3
-
-def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
-    conn = pymysql.connect(...)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT role, content FROM conversations "
-                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
-                (thread_id, rounds * 2)
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-    return [{"role": r, "content": c} for r, c in reversed(rows)]
-
-# 在接口里
-history = load_recent_history(thread_id)
-messages = history + [{"role": "user", "content": payload.message}]
-result = await agent.ainvoke({"messages": messages}, config=config)
+key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
 ```
+
+因为同一个问题在不同上下文里答案可能不同，不加 thread_id 会导致不同会话串台。
 
 **测试验证**：
-1. 同一 thread_id 问"它是什么" → 能理解上下文 ✅
-2. **重启服务**后再问"它是什么" → 仍能理解 ✅（长期记忆生效）
-3. 换 thread_id 问"它是什么" → 无法理解 ✅（会话隔离）
+1. `test_001` 问"MMR 是什么？" → 正常回答
+2. **重启服务**
+3. `test_001` 问"它和普通相似度检索有什么区别？" → 仍能理解"它"指 MMR ✅
 
-**生产优化**：`InMemorySaver` 换成 `RedisSaver`，或直接用 MySQL 加载历史。
+**生产优化**：AsyncSqliteSaver 换 `PostgresSaver`，支持多实例共享。
 
 **面试话术**：
-> "我的记忆分两层：短期用 InMemorySaver 做单次会话加速，长期用 MySQL 按 thread_id 加载最近 3 轮历史。每次请求先把历史拼进 messages，再传给 Agent。这样即使服务重启，用户回来还能继续之前的对话。缓存 key 也带了 thread_id，避免不同会话串台。"
+> "我的记忆用 LangGraph 的 checkpointer 做唯一真相源，持久化用 AsyncSqliteSaver（生产环境会换 PostgresSaver）。每次请求只传当前这一轮的消息，Agent 自动从 checkpointer 加载该 thread_id 的历史。之前我试过手动从 MySQL 加载历史拼进 messages，但发现和 checkpointer 的 state 会打架——消息格式混用、历史可能重复累积。后来统一到 checkpointer，MySQL 只做展示层给 /history 接口用。"
 
 ### 13. 检索不到内容怎么处理？
 
@@ -523,34 +524,7 @@ result = await agent.ainvoke({"messages": messages}, config=config)
 **面试话术**：
 > "我评估 RAG 用了四个指标。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。实测发现精确率和多样性呈 trade-off：追求精确用相似度，需要多角度用 MMR+去重。MRR 三种策略都在 0.96 以上，Top-1 都很准。"
 
-### 15. 长期记忆怎么实现？
-
-**方案**：每次请求从 MySQL 加载最近 N 轮历史，拼进 messages。
-
-```python
-HISTORY_ROUNDS = 3
-
-def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
-    # 从 MySQL 查最近 N*2 条（每轮 human + ai）
-    # 按时间正序返回
-    ...
-```
-
-**关键设计**：
-
-| 点 | 原因 |
-|---|---|
-| 限制轮数（3 轮） | 避免上下文爆炸 |
-| 正序返回 | 模型看到的时间线要正确 |
-| 每次实时加载 | MySQL 是权威数据源 |
-
-**验证**：
-- 重启服务后仍能理解"它指什么" → 长期记忆生效
-
-**面试话术**：
-> "长期记忆用 MySQL 实现。每次请求从 MySQL 加载最近 3 轮对话，拼进 messages 一起发给模型。这样即使服务重启、用户换设备，也能记得之前的对话。生产环境可以把短期记忆的 InMemorySaver 换成 RedisSaver，或者直接用 MySQL 加载历史，两种方案互补。"
-
-### 16. 如果让你重做，会改什么？
+### 15. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - RAG 加 Rerank（bge-reranker-base）
@@ -558,6 +532,7 @@ def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
 - 加 LangSmith 可观测性
 - 写单元测试和集成测试
 - 文档库扩充到几百个文件，让不同检索策略的差异更明显
+- 加 chunk 级评估（不只是文档级）
 
 ## 八、项目数据（面试时能报的具体数字）
 
@@ -570,10 +545,9 @@ def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
 - RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
-- **短期记忆：InMemorySaver**
-- **长期记忆：MySQL 加载最近 3 轮历史**
+- **记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）**
 - 缓存：Redis（TTL 3600 秒，key 带 thread_id）
-- 历史：MySQL（表 conversations）
+- 展示层：MySQL（表 conversations）
 - 评估指标：召回率 / 精确率 / MRR / 多样性（30 个测试项）
 - 首次 Docker 构建耗时：约 19 分钟
 - 单次请求耗时：未命中 2~3 秒，命中 <0.1 秒
@@ -585,13 +559,12 @@ def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
 2. 测普通对话：POST /chat
 3. 测流式对话：POST /chat/stream
 4. 查看对话历史：GET /history?thread_id=user_001
-5. **演示短期记忆**：同 thread_id 连续问"MMR 是什么" → "它和普通相似度有什么区别"
-6. **演示长期记忆**：重启服务后再问"它和普通相似度有什么区别" → 仍能理解
-7. 演示会话隔离：换 thread_id 问"它是什么"
-8. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
-9. 用浏览器打开 client.html，看打字机效果
-10. 展示 Docker 一键启动：docker compose up -d
-11. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+5. **演示持久化记忆**：问"MMR 是什么" → **重启服务** → 问"它和普通相似度有什么区别" → 仍能理解
+6. 演示会话隔离：换 thread_id 问"它是什么"
+7. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
+8. 用浏览器打开 client.html，看打字机效果
+9. 展示 Docker 一键启动：docker compose up -d
+10. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -653,15 +626,15 @@ def load_recent_history(thread_id, rounds=HISTORY_ROUNDS):
 - 混合检索：两者加权合并，取长补短
 - RRF 是标准合并算法，公式 `Σ 权重/(k+排名)`
 
-## 十一、Redis 缓存 + MySQL 历史（工程化）
+## 十一、Redis 缓存 + MySQL 展示层（工程化）
 
 ### 为什么需要这两个
 
 | 问题 | 解法 |
 |---|---|
 | 同一个问题反复问，每次调大模型浪费 Token | Redis 缓存回答 |
-| 服务重启后对话历史丢失 | MySQL 持久化 + 长期记忆加载 |
-| 多实例部署状态不一致 | MySQL + Redis 共享外部存储 |
+| 服务重启后对话历史丢失 | AsyncSqliteSaver 持久化 |
+| 需要展示对话历史 | MySQL 展示层 |
 
 ### Redis 缓存实现
 
@@ -684,7 +657,7 @@ def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
 - TTL 设 1 小时，过期自动清理
 - 命中缓存不调大模型，省 Token 也省时间
 
-### MySQL 对话历史实现
+### MySQL 对话历史（展示层）
 
 ```sql
 CREATE TABLE conversations (
@@ -696,30 +669,7 @@ CREATE TABLE conversations (
 );
 ```
 
-```python
-import pymysql
-
-def save_conversation(thread_id: str, role: str, content: str):
-    conn = pymysql.connect(
-        host="localhost", port=3306, user="root",
-        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO conversations (thread_id, role, content) VALUES (%s, %s, %s)",
-                (thread_id, role, content)
-            )
-        conn.commit()
-    finally:
-        conn.close()
-```
-
-**关键点**：
-- 按 thread_id 分组，不同用户隔离
-- 用 `%s` 参数化查询，防 SQL 注入
-- `charset="utf8mb4"` 支持中文和 emoji
-- `try/finally` 保证连接一定关闭
+**角色**：MySQL **不再是记忆源**，只是**展示层**——给 `/history` 接口用，让用户查看历史。Agent 的历史由 checkpointer 管。
 
 ### 完整数据流
 
@@ -727,10 +677,9 @@ def save_conversation(thread_id: str, role: str, content: str):
 用户提问（带 thread_id）
     ↓
 Redis 查缓存（key 带 thread_id）
-    ├── 命中 → 返回缓存 + 写 MySQL 历史
-    └── 未命中 → 从 MySQL 加载最近 N 轮历史
-              → 拼进 messages → 调 Agent
-              → 写 Redis 缓存 + 写 MySQL 历史 → 返回
+    ├── 命中 → 返回缓存 + 写 MySQL 展示层
+    └── 未命中 → 调 Agent（checkpointer 自动加载历史）
+              → 写 Redis 缓存 + 写 MySQL 展示层 → 返回
 ```
 
 ### 面试答题要点
@@ -738,9 +687,9 @@ Redis 查缓存（key 带 thread_id）
 | 问题 | 答案 |
 |---|---|
 | 高频问题怎么优化？ | Redis 缓存，key 带 thread_id，TTL 一小时 |
-| 对话历史怎么持久化？ | MySQL 存，按 thread_id 分组 |
-| 长期记忆怎么实现？ | 每次请求从 MySQL 加载最近 N 轮，拼进 messages |
-| 多实例部署怎么共享状态？ | MySQL + Redis 都放外部，实例无状态 |
+| 对话历史怎么持久化？ | LangGraph checkpointer + AsyncSqliteSaver |
+| MySQL 用来做什么？ | 展示层，给 /history 接口用 |
+| 多实例部署怎么共享状态？ | Redis 共享缓存；checkpointer 换 PostgresSaver |
 | Redis 和 MySQL 区别？ | Redis 内存、快、适合缓存；MySQL 磁盘、持久、适合结构化数据 |
 | 限流怎么做？ | Redis `incr` + `expire`，每分钟超 N 次返回 429 |
 | 为什么缓存 key 用 MD5？ | 避免中文/特殊字符问题，固定长度省内存 |
@@ -749,7 +698,7 @@ Redis 查缓存（key 带 thread_id）
 ### 可优化方向
 
 - 缓存加版本号（`chat:v1:{thread_id}:xxx`），prompt 改了自动失效
-- 历史只加载最近 N 轮，避免上下文太长
+- 缓存 key 加 history hash（同一问题在不同上下文答案不同）
 - Redis 加密码和连接池，生产环境必须
 - 用连接池代替每次新建连接（性能优化）
 
@@ -781,13 +730,13 @@ class ChatResponse(BaseModel):
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动逻辑
-    memory = InMemorySaver()
-    agent = create_agent(model, tools=tools, checkpointer=memory, ...)
-    ensure_table()
-    yield
-    # 关闭逻辑
-    print("[关闭] 服务停止")
+    global agent
+    ...
+    checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+    async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+        agent = create_agent(model, tools=tools, checkpointer=saver, ...)
+        ensure_table()
+        yield
 
 app = FastAPI(lifespan=lifespan)
 ```
@@ -797,11 +746,7 @@ app = FastAPI(lifespan=lifespan)
 - 在顶层调 `asyncio.run()` 会和 uvicorn 事件循环冲突
 - lifespan 在事件循环里执行，可以 `await`
 
-**适合放什么**：
-- 连接数据库 / Redis / MCP Server
-- 加载模型
-- 建表（幂等）
-- 初始化 Agent 和记忆
+**为什么用 `async with`**：`AsyncSqliteSaver` 需要在生命周期内保持连接。`async with` 保证服务停止时正确关闭。
 
 ### 3. MySQL 幂等建表
 
@@ -811,13 +756,7 @@ def ensure_table():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id INT PRIMARY KEY AUTO_INCREMENT,
-                    thread_id VARCHAR(64),
-                    role VARCHAR(20),
-                    content TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
+                CREATE TABLE IF NOT EXISTS conversations (...)
             """)
         conn.commit()
     finally:
@@ -826,14 +765,14 @@ def ensure_table():
 
 **关键点**：
 - `IF NOT EXISTS`：表存在则跳过，**幂等**
-- 在 lifespan 启动时调用，**服务自愈**（数据卷被清空也能自动重建）
+- 在 lifespan 启动时调用，**服务自愈**
 - `try/finally` 保证连接一定关闭
 
 ### 4. SSE 流式接口的中间步骤过滤
 
-**问题**：Agent 在调用工具前会有英文思考（"I'll look that up..."），不该给用户看。
+**问题**：Agent 在调用工具前会有英文思考，不该给用户看。
 
-**解法**：用 `saw_tool` 标志区分中间步骤和最终回答。
+**解法**：用 `saw_tool` 标志区分。
 
 ```python
 saw_tool = False    # 是否已过工具节点
@@ -842,40 +781,20 @@ started = False     # 是否已开始输出最终回答
 
 async for chunk in agent.astream(...):
     msg_chunk, metadata = chunk
-
     if msg_chunk.type == "tool":
         saw_tool = True
-        pending = []        # 清空中间步骤
+        pending = []
         continue
-
     if not msg_chunk.content:
         continue
-
     if saw_tool:
-        # 工具已返回，这是最终回答，实时输出
         yield f"data: {json.dumps({'text': msg_chunk.content})}\n\n"
         started = True
     else:
-        # 工具调用前的内容，先缓存
         pending.append(msg_chunk.content)
-
-# 整个流程没调工具（纯聊天），把缓存一次性输出
-if not started and pending:
-    for text in pending:
-        yield f"data: {json.dumps({'text': text})}\n\n"
 ```
 
-**三个变量的作用**：
-
-| 变量 | 作用 |
-|---|---|
-| `saw_tool` | 分界线，工具返回前后 |
-| `pending` | 缓存工具调用前的内容 |
-| `started` | 标记是否已输出最终回答 |
-
-**设计权衡**：
-- RAG 场景（有工具调用）：完全正常，实时流式
-- 纯聊天场景（无工具）：先缓存再一次性输出，打字机效果打折
+**已知不足**：如果模型在工具调用后不再输出文本（比如工具结果直接就是答案），`started` 永远是 False，最后只发 `[DONE]`，用户看到空白。生产环境应该用 `metadata["langgraph_node"]` 做来源判断，并处理多次 model 调用。
 
 ### 5. SSE 格式规范
 
@@ -886,15 +805,11 @@ yield f"data: {json.dumps({'text': msg_chunk.content}, ensure_ascii=False)}\n\n"
 | 部分 | 作用 |
 |---|---|
 | `data: ` | SSE 协议要求的前缀 |
-| `json.dumps(...)` | 转成 JSON，方便客户端解析 |
-| `ensure_ascii=False` | 保留中文，不转 `\uXXXX` |
-| `\n\n` | 两条换行表示"本条消息结束" |
+| `json.dumps(...)` | 转成 JSON |
+| `ensure_ascii=False` | 保留中文 |
+| `\n\n` | 两条换行表示结束 |
 
-**结束标记**：
-```python
-yield "data: [DONE]\n\n"
-```
-告诉客户端"流结束了"，客户端停止读取。
+**结束标记**：`yield "data: [DONE]\n\n"`
 
 ### 6. 异常处理
 
@@ -907,10 +822,7 @@ finally:
     yield "data: [DONE]\n\n"
 ```
 
-**好处**：
-- 不返回 HTTP 500 一大坨堆栈
-- 客户端拿到结构化的错误信息
-- `finally` 保证 `[DONE]` 一定发出
+**已知不足**：直接返回 `str(e)` 可能泄漏 API key、路径等内部信息。生产环境应映射成错误码。
 
 ### 7. Redis 缓存 key 设计
 
@@ -924,103 +836,75 @@ key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
 - MD5 固定 32 字符，安全稳定
 
 **为什么加 `chat:` 前缀和 `thread_id`？**
-- `chat:`：命名空间隔离，Redis 里可能有其他 key
-- `thread_id`：多轮对话下同一问题上下文不同，**防止串台**
+- `chat:`：命名空间隔离
+- `thread_id`：多轮对话下防止串台
 
-### 8. Agent 护栏（防止死循环和 Token 爆炸）
+**已知不足**：缓存 key 不含 history hash。同一个问题在第 1 轮和第 5 轮上下文不同，答案应该不同，但会命中同一个缓存。生产环境应该把 history hash 也加进 key。
 
-**问题**：Agent 在复杂任务下可能无限调用工具，或者单次输出过长，浪费 Token。
+### 8. Agent 护栏
+
+**问题**：Agent 可能无限调用工具，或者单次输出过长。
 
 **方案**：两道护栏。
 
 ```python
-RECURSION_LIMIT = 10    # 最大循环次数
-MAX_TOKENS = 2000       # 单次输出上限
+RECURSION_LIMIT = 10
+MAX_TOKENS = 2000
 
-model = ChatOpenAI(
-    ...,
-    max_tokens=MAX_TOKENS,   # 护栏 1：限制输出长度
-)
-
-agent = create_agent(model, tools=tools, ...)
-
-# 护栏 2：每次调用带 recursion_limit
+model = ChatOpenAI(..., max_tokens=MAX_TOKENS)
 config = {"recursion_limit": RECURSION_LIMIT}
-result = await agent.ainvoke({...}, config=config)
-async for chunk in agent.astream({...}, config=config, stream_mode="messages"):
-    ...
 ```
 
-**两道护栏的作用**：
+### 9. 持久化记忆（AsyncSqliteSaver）
 
-| 护栏 | 防止什么 | 触发后 |
-|---|---|---|
-| `recursion_limit=10` | Agent 死循环（无限调工具） | 抛 `GraphRecursionError`，被 `try/except` 捕获，返回友好错误 |
-| `max_tokens=2000` | 单次输出过长，浪费 Token | 模型自然截断，最多输出 2000 token |
+**问题**：`InMemorySaver` 是进程内存，服务重启后记忆丢失。手动从 MySQL 加载历史又和 checkpointer 打架。
 
-**面试话术**：
-> "我给 Agent 设了两道护栏：一是 recursion_limit=10，超过自动抛异常终止；二是 max_tokens=2000，限制单次输出。第一道防止 Agent 无限调用工具，第二道防止单次回答过长。在流式接口里，异常会被 try/except 捕获，以 SSE 格式返回友好错误，不会让服务崩掉。"
-
-### 9. 多轮对话记忆
-
-（见第七部分第 12 题的"两层记忆"）
-
-### 10. 降级策略（避免幻觉）
-
-（见第五部分 5.4 节）
-
-### 11. 长期记忆（MySQL 历史加载）
-
-**问题**：`InMemorySaver` 是进程内存，服务重启后记忆丢失。用户昨天问过的问题，今天再问，Agent 不记得。
-
-**方案**：每次请求从 MySQL 加载最近 N 轮历史，拼进 messages。
+**方案**：用 `AsyncSqliteSaver` 做持久化 checkpointer。
 
 ```python
-HISTORY_ROUNDS = 3   # 加载最近 3 轮
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-def load_recent_history(thread_id: str, rounds: int = HISTORY_ROUNDS):
-    """加载最近 N 轮对话，按时间正序返回"""
-    conn = pymysql.connect(...)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT role, content FROM conversations "
-                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
-                (thread_id, rounds * 2)   # 每轮 = human + ai
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-
-    # 反转成时间正序
-    return [{"role": r, "content": c} for r, c in reversed(rows)]
+checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+    agent = create_agent(
+        model, tools=tools,
+        checkpointer=saver,   # 持久化 saver
+        system_prompt="..."
+    )
 ```
 
-在 `/chat` 里：
+调用时只传当前问题，**不手动拼历史**：
 
 ```python
-history = load_recent_history(thread_id)
-messages = history + [{"role": "user", "content": payload.message}]
-result = await agent.ainvoke({"messages": messages}, config=config)
+config = {"configurable": {"thread_id": thread_id}}
+result = await agent.ainvoke(
+    {"messages": [{"role": "user", "content": payload.message}]},
+    config=config
+)
 ```
 
 **关键设计**：
 
-| 点 | 原因 |
-|---|---|
-| 限制轮数（`HISTORY_ROUNDS=3`） | 避免上下文爆炸 |
-| 正序返回 | 模型看到的时间线要正确 |
-| 每次请求实时加载 | MySQL 是权威数据源 |
+| 角色 | 之前 | 之后 |
+|---|---|---|
+| 记忆源 | InMemorySaver + MySQL 手动拼 | **AsyncSqliteSaver（唯一真相源）** |
+| MySQL | 记忆源 | **降级为展示层**（给 /history 用） |
+| 消息格式 | OpenAI dict 手动拼 | 统一交给 LangGraph |
+
+**为什么这么改**：
+- 之前双源会打架：消息格式混用、历史可能重复累积
+- LangGraph checkpointer 本来就是设计来管状态的
+- 生产环境可以升级到 PostgresSaver，接口不变
 
 **验证**：
-1. 第一轮问"MMR 是什么？" → `[长期记忆] 加载了 0 条历史消息`
+1. 第一轮问"MMR 是什么？"
 2. **重启服务**
-3. 第二轮问"它和普通相似度有什么区别？" → `[长期记忆] 加载了 2 条历史消息` + 能理解"它"
+3. 第二轮问"它和普通相似度有什么区别？" → 仍能理解 ✅
 
 **面试话术**：
-> "我的记忆分两层：短期用 InMemorySaver，进程内存，重启丢失；长期用 MySQL，每次请求加载最近 3 轮历史拼进 messages。这样即使服务重启，用户回来还能继续之前的对话。生产环境可以把 InMemorySaver 换成 RedisSaver，或者直接用 MySQL 加载历史，两种方案互补。"
+> "我的记忆用 LangGraph 的 checkpointer 做唯一真相源，持久化用 AsyncSqliteSaver（生产环境会换 PostgresSaver）。之前我试过手动从 MySQL 加载历史拼进 messages，但发现和 checkpointer 的 state 会打架——消息格式混用、历史可能重复累积。后来统一到 checkpointer，MySQL 只做展示层给 /history 接口用。"
 
-### 12. 面试高频问题
+### 10. 面试高频问题
 
 | 问题 | 答案要点 |
 |---|---|
@@ -1029,10 +913,10 @@ result = await agent.ainvoke({"messages": messages}, config=config)
 | 为什么用 lifespan 不用顶层代码？ | 顶层会和 uvicorn 事件循环冲突 |
 | 流式接口怎么过滤中间步骤？ | `saw_tool` 标志分界，`pending` 缓存工具前内容 |
 | SSE 格式是什么？ | `data: 内容\n\n`，结束发 `[DONE]` |
-| MySQL 表怎么初始化？ | lifespan 里 `CREATE TABLE IF NOT EXISTS`，幂等自愈 |
 | Agent 死循环怎么防？ | `recursion_limit=10` + `max_tokens=2000` |
-| Agent 多轮对话怎么实现？ | 短期 InMemorySaver + 长期 MySQL 加载，缓存 key 带 thread_id 防串台 |
-| 长期记忆怎么实现？ | 每次请求从 MySQL 加载最近 N 轮历史，拼进 messages |
+| Agent 多轮对话怎么实现？ | LangGraph checkpointer + AsyncSqliteSaver |
+| 长期记忆怎么实现？ | AsyncSqliteSaver 持久化到 SQLite 文件 |
+| MySQL 用来做什么？ | 展示层，给 /history 接口用 |
 | 检索不到内容怎么处理？ | 距离阈值降级，返回"没找到"，不调 LLM |
 | RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 |
 
@@ -1068,16 +952,13 @@ def evaluate_full(search_fn, name, k=3):
         results = search_fn(item["question"], k)
         sources = [doc.metadata["source"] for doc in results]
 
-        # 召回率
         if any(exp in sources for exp in item["expected_sources"]):
             hit += 1
 
-        # 精确率
         if sources:
             relevant = sum(1 for s in sources if s in item["expected_sources"])
             precision_sum += relevant / len(sources)
 
-        # MRR
         for rank, s in enumerate(sources, 1):
             if s in item["expected_sources"]:
                 mrr_sum += 1 / rank
@@ -1092,8 +973,6 @@ def evaluate_full(search_fn, name, k=3):
 
 ### 评估结果（当前 2 个文档 / 102 chunk）
 
-**四个指标对比**：
-
 | 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
 |---|---|---|---|---|
 | 普通相似度 | 100% | **0.87** | 0.96 | 1.37 |
@@ -1106,11 +985,10 @@ def evaluate_full(search_fn, name, k=3):
 
 - 相似度：精确率最高（0.87），多样性最低（1.37）
 - MMR + 去重：多样性最高（1.57），精确率最低（0.77）
-- **这是必然的取舍**：想要多角度信息，就要接受部分结果不直接相关
 
 **2. MRR 几乎不变（0.96~0.97）**
 
-三种策略的 Top-1 都很准，第一个正确结果总是排第一。
+三种策略的 Top-1 都很准。
 
 **3. 选哪个策略取决于业务**
 
@@ -1121,8 +999,6 @@ def evaluate_full(search_fn, name, k=3):
 | 平衡 | MMR |
 
 ### 早期评估（5 个文档 / 24 chunk）
-
-**这组数据用于对比 MMR 和相似度，体现"多样性 vs 召回率"的权衡：**
 
 | 策略 | 召回率 | 平均多样性 |
 |---|---|---|
@@ -1135,42 +1011,43 @@ def evaluate_full(search_fn, name, k=3):
 ### 失败案例分析
 
 **案例 1**："怎么让回答一个字一个字显示出来？"
-- 期望：`deployment.md`（流式输出那节）
+- 期望：`deployment.md`
 - 实际：`langchain.md`、`rag.md`
-- 原因：用户用口语表达，文档用术语"流式输出"、"SSE"
+- 原因：口语化表达和文档术语有语义鸿沟
 
 **案例 2**："多 Agent 系统怎么保证消息不丢？"
 - 期望：`langgraph.md`、`deployment.md`
-- 实际：`langchain.md`、`rag.md`、`langchain.md`
+- 实际：`langchain.md`、`rag.md`
 - 原因：MMR 强制 chunk 级多样性时挤掉了最相关的文档
+
+### 已知不足
+
+- **文档级召回而非 chunk 级**：用 `source`（文件名）判断命中，只有两三篇文档，命中太容易，含金量不高。生产环境应该标注 chunk id 或关键句。
+- **30 条样本太少**：3% 的差异（97% vs 93%）是一条样本的差别，统计上无意义。应该扩到 200 条以上。
+- **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness。
+- **没有 Rerank 对比**：粗排后应该加 Rerank 精排，对比前后指标。
 
 ### 改进方案
 
-| 方案 | 原理 | 成本 |
+| 方案 | 原理 | 状态 |
 |---|---|---|
-| 混合检索 | 向量 + BM25，加权合并 | 中（已做） |
-| 降级策略 | 距离阈值拦截无关问题 | 低（已做） |
-| 多指标评估 | 召回率 + 精确率 + MRR + 多样性 | 低（已做） |
-| 查询改写 | LLM 把口语改写成术语 | 低 |
-| 文档增强 | 补充口语化同义表达 | 低 |
-| Rerank | 先粗排 Top-20，再精排 Top-3 | 中 |
+| 混合检索 | 向量 + BM25，加权合并 | ✅ 已做 |
+| 降级策略 | 距离阈值拦截无关问题 | ✅ 已做 |
+| 多指标评估 | 召回率 + 精确率 + MRR + 多样性 | ✅ 已做 |
+| Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ⏳ 待做 |
+| Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
+| 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
+| 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
 
 ### 面试答题模板
 
 > "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标：召回率、精确率、MRR、多样性。实测发现精确率和多样性呈 trade-off：纯相似度精确率 0.87、多样性 1.37；MMR+去重多样性 1.57、精确率 0.77。MRR 三种策略都在 0.96 以上，Top-1 都很准。选策略看业务——追求精确用相似度，需要多角度用 MMR+去重。之前还发现等权 RRF 反而比纯向量差（97%），加权后（向量 0.7、BM25 0.3）恢复到 100%。"
 
-### 可优化方向
-
-- 加 Rerank 精排
-- 扩充测试集到 100 题以上
-- 引入 RAGAS 自动评估生成质量（忠实度、答案相关性）
-- 文档库扩充到几百个文件，让策略差异更明显
-
 ## 十四、项目新增数据
 
 - Redis key 格式：`chat:{thread_id}:{md5}`
 - Redis TTL：3600 秒
-- MySQL 表名：`conversations`
+- MySQL 表名：`conversations`（展示层）
 - MySQL 字段：id, thread_id, role, content, created_at
 - 缓存命中 vs 未命中：未命中约 2~3 秒，命中不到 0.1 秒
 - 新增接口：`GET /history?thread_id=user_001&limit=20`
@@ -1183,6 +1060,5 @@ def evaluate_full(search_fn, name, k=3):
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
-- 短期记忆：InMemorySaver
-- 长期记忆：MySQL 加载最近 3 轮历史（HISTORY_ROUNDS=3）
+- **记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）**
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
