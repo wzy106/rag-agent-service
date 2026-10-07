@@ -7,7 +7,7 @@ import pymysql
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -27,15 +27,52 @@ MAX_TOKENS = 2000
 # ===== Redis 缓存 =====
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
-def get_cached(thread_id: str, query: str):
-    key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
+def get_context_version(thread_id: str) -> int:
+    """
+    获取该会话的上下文版本号（= MySQL 里的消息数）。
+    同一个问题在不同上下文里答案可能不同，所以缓存 key 必须带版本号。
+    """
+    conn = pymysql.connect(
+        host="localhost", port=3306, user="root",
+        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM conversations WHERE thread_id = %s",
+                (thread_id,)
+            )
+            count = cur.fetchone()[0]
+    finally:
+        conn.close()
+    return count
+
+def get_cached(thread_id: str, query: str, context_version: int):
+    key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
     return r.get(key)
 
-def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
-    key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
+def set_cache(thread_id: str, query: str, answer: str, context_version: int, ttl: int = 3600):
+    key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
     r.set(key, answer, ex=ttl)
 
-# ===== MySQL 对话历史（只做展示层） =====
+# ===== 友好错误提示 =====
+def friendly_error(e: Exception) -> str:
+    """
+    把异常映射成用户可读的错误提示。
+    不把 str(e) 直接返回客户端（可能泄漏 API key、路径、SQL 结构等内部信息）。
+    """
+    msg = str(e).lower()
+    if "authentication" in msg or "401" in msg or "api key" in msg:
+        return "模型服务认证失败，请联系管理员"
+    if "timeout" in msg or "timed out" in msg:
+        return "请求超时，请稍后再试"
+    if "rate" in msg or "429" in msg:
+        return "请求过于频繁，请稍后再试"
+    if "connection" in msg or "connect" in msg:
+        return "服务暂时不可用，请稍后再试"
+    return "服务暂时不可用，请稍后再试"
+
+# ===== MySQL 对话历史（展示层） =====
 def save_conversation(thread_id: str, role: str, content: str):
     conn = pymysql.connect(
         host="localhost", port=3306, user="root",
@@ -97,13 +134,12 @@ async def lifespan(app: FastAPI):
         max_tokens=MAX_TOKENS,
     )
 
-    # 持久化 checkpointer（SQLite 文件，重启不丢）
     checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
         agent = create_agent(
             model,
             tools=tools,
-            checkpointer=saver,     # 用持久化 saver
+            checkpointer=saver,
             system_prompt="你是一个知识助手，回答问题时优先调用 search_knowledge 工具查询知识库。"
         )
         print(f"[启动] Agent 创建完成（持久化记忆 + 护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}）")
@@ -140,31 +176,38 @@ def root():
 async def chat(payload: ChatRequest):
     thread_id = payload.thread_id
 
-    # 1. 查缓存
-    cached = get_cached(thread_id, payload.message)
+    # 1. 查缓存（key 带上下文版本号）
+    context_version = get_context_version(thread_id)
+    cached = get_cached(thread_id, payload.message, context_version)
     if cached:
-        print(f"[缓存命中] {payload.message}")
+        print(f"[缓存命中] {payload.message} (v{context_version})")
         save_conversation(thread_id, "human", payload.message)
         save_conversation(thread_id, "ai", cached)
         return ChatResponse(reply=cached)
 
-    # 2. 调 Agent（不带手动拼的 history，让 checkpointer 管）
+    # 2. 调 Agent
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": RECURSION_LIMIT,
     }
 
-    result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": payload.message}]},
-        config=config
-    )
-    answer = result["messages"][-1].content
+    try:
+        result = await agent.ainvoke(
+            {"messages": [{"role": "user", "content": payload.message}]},
+            config=config
+        )
+        answer = result["messages"][-1].content
+    except Exception as e:
+        # 服务端日志记录完整异常
+        print(f"[错误] {type(e).__name__}: {str(e)}")
+        # 客户端只看到友好提示
+        raise HTTPException(status_code=500, detail=friendly_error(e))
 
-    # 3. 写缓存 + 存历史（MySQL 只做展示层）
-    set_cache(thread_id, payload.message, answer)
+    # 3. 写缓存（用当前 version）+ 存历史
+    set_cache(thread_id, payload.message, answer, context_version)
     save_conversation(thread_id, "human", payload.message)
     save_conversation(thread_id, "ai", answer)
-    print(f"[缓存写入] {payload.message}")
+    print(f"[缓存写入] {payload.message} (v{context_version})")
     return ChatResponse(reply=answer)
 
 @app.get("/history")
@@ -233,17 +276,25 @@ async def chat_stream(payload: StreamRequest):
                 else:
                     pending.append(msg_chunk.content)
 
+            # 兜底：如果整个流程没输出任何文本，给个友好提示
             if not started and pending:
                 for text in pending:
                     yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
                     full_answer += text
+            elif not started and not pending:
+                fallback = "抱歉，我无法生成回答。"
+                yield f"data: {json.dumps({'text': fallback}, ensure_ascii=False)}\n\n"
+                full_answer = fallback
 
             # 存 MySQL（展示层）
             save_conversation(thread_id, "human", payload.message)
             save_conversation(thread_id, "ai", full_answer)
 
         except Exception as e:
-            yield f"data: {json.dumps({'error': f'服务出错了：{str(e)}'}, ensure_ascii=False)}\n\n"
+            # 服务端日志记录完整异常
+            print(f"[错误] {type(e).__name__}: {str(e)}")
+            # 客户端只看到友好提示
+            yield f"data: {json.dumps({'error': friendly_error(e)}, ensure_ascii=False)}\n\n"
         finally:
             elapsed = time.time() - start_time
             print(f"[请求] 耗时 {elapsed:.2f} 秒")
