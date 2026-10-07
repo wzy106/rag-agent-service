@@ -15,4 +15,4 @@ __pycache__/
 faiss_index/
 
 # LangGraph 持久化 checkpointer
-checkpoints.db
+checkpoints.db*

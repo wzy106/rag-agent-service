@@ -30,6 +30,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 - **RAG 评估**：30 个测试项，对比三种检索策略
 - **异常处理**：错误以 SSE 格式返回，不返回 500 堆栈
 - **Docker 部署**：一键启动
+- **Agent 护栏**:（recursion_limit=10，max_tokens=2000）
 
 ## 目录结构
 
