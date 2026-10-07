@@ -14,16 +14,15 @@ from pydantic import BaseModel
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-# 找 .env（在上一级目录）
+# 找 .env
 env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(env_path)
 
 # ===== 护栏配置 =====
-RECURSION_LIMIT = 10    # Agent 最大循环次数，超过自动终止
-MAX_TOKENS = 2000       # 单次输出最大 token 数
-HISTORY_ROUNDS = 3      # 长期记忆：加载最近 N 轮对话
+RECURSION_LIMIT = 10
+MAX_TOKENS = 2000
 
 # ===== Redis 缓存 =====
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
@@ -36,7 +35,7 @@ def set_cache(thread_id: str, query: str, answer: str, ttl: int = 3600):
     key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
     r.set(key, answer, ex=ttl)
 
-# ===== MySQL 对话历史 =====
+# ===== MySQL 对话历史（只做展示层） =====
 def save_conversation(thread_id: str, role: str, content: str):
     conn = pymysql.connect(
         host="localhost", port=3306, user="root",
@@ -52,31 +51,7 @@ def save_conversation(thread_id: str, role: str, content: str):
     finally:
         conn.close()
 
-def load_recent_history(thread_id: str, rounds: int = HISTORY_ROUNDS):
-    """加载最近 N 轮对话，按时间正序返回（用于拼进 messages）"""
-    conn = pymysql.connect(
-        host="localhost", port=3306, user="root",
-        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT role, content FROM conversations "
-                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
-                (thread_id, rounds * 2)   # 每轮 = human + ai
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-
-    # SQL 查出来是最新在前，要反转为时间正序
-    history = []
-    for role, content in reversed(rows):
-        history.append({"role": role, "content": content})
-    return history
-
 def ensure_table():
-    """启动时确保 conversations 表存在"""
     conn = pymysql.connect(
         host="localhost", port=3306, user="root",
         password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
@@ -122,20 +97,22 @@ async def lifespan(app: FastAPI):
         max_tokens=MAX_TOKENS,
     )
 
-    memory = InMemorySaver()
+    # 持久化 checkpointer（SQLite 文件，重启不丢）
+    checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+    async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+        agent = create_agent(
+            model,
+            tools=tools,
+            checkpointer=saver,     # 用持久化 saver
+            system_prompt="你是一个知识助手，回答问题时优先调用 search_knowledge 工具查询知识库。"
+        )
+        print(f"[启动] Agent 创建完成（持久化记忆 + 护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}）")
 
-    agent = create_agent(
-        model,
-        tools=tools,
-        checkpointer=memory,
-        system_prompt="你是一个知识助手，回答问题时优先调用 search_knowledge 工具查询知识库。"
-    )
-    print(f"[启动] Agent 创建完成（护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}, 历史轮数={HISTORY_ROUNDS}）")
+        ensure_table()
+        print("[启动] MySQL 表检查完成")
 
-    ensure_table()
-    print("[启动] MySQL 表检查完成")
+        yield
 
-    yield
     print("[关闭] 服务停止")
 
 # ===== FastAPI =====
@@ -163,7 +140,7 @@ def root():
 async def chat(payload: ChatRequest):
     thread_id = payload.thread_id
 
-    # 1. 先查缓存
+    # 1. 查缓存
     cached = get_cached(thread_id, payload.message)
     if cached:
         print(f"[缓存命中] {payload.message}")
@@ -171,22 +148,19 @@ async def chat(payload: ChatRequest):
         save_conversation(thread_id, "ai", cached)
         return ChatResponse(reply=cached)
 
-    # 2. 加载长期记忆（MySQL 最近 N 轮）
-    history = load_recent_history(thread_id)
-    print(f"[长期记忆] 加载了 {len(history)} 条历史消息")
-
-    # 3. 拼 messages：历史 + 本次问题
-    messages = history + [{"role": "user", "content": payload.message}]
-
-    # 4. 调 Agent
+    # 2. 调 Agent（不带手动拼的 history，让 checkpointer 管）
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": RECURSION_LIMIT,
     }
-    result = await agent.ainvoke({"messages": messages}, config=config)
+
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": payload.message}]},
+        config=config
+    )
     answer = result["messages"][-1].content
 
-    # 5. 写缓存 + 存历史
+    # 3. 写缓存 + 存历史（MySQL 只做展示层）
     set_cache(thread_id, payload.message, answer)
     save_conversation(thread_id, "human", payload.message)
     save_conversation(thread_id, "ai", answer)
@@ -235,19 +209,13 @@ async def chat_stream(payload: StreamRequest):
             started = False
             full_answer = ""
 
-            # 加载长期记忆
-            history = load_recent_history(thread_id)
-            print(f"[长期记忆] 加载了 {len(history)} 条历史消息")
-
-            messages = history + [{"role": "user", "content": payload.message}]
-
             config = {
                 "configurable": {"thread_id": thread_id},
                 "recursion_limit": RECURSION_LIMIT,
             }
 
             async for chunk in agent.astream(
-                {"messages": messages},
+                {"messages": [{"role": "user", "content": payload.message}]},
                 config=config,
                 stream_mode="messages"
             ):
@@ -270,7 +238,7 @@ async def chat_stream(payload: StreamRequest):
                     yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
                     full_answer += text
 
-            # 流式结束后存历史
+            # 存 MySQL（展示层）
             save_conversation(thread_id, "human", payload.message)
             save_conversation(thread_id, "ai", full_answer)
 
