@@ -1,8 +1,7 @@
 import os
 import json
 import time
-import hashlib
-import redis
+import asyncio
 import pymysql
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -24,59 +23,32 @@ load_dotenv(env_path)
 RECURSION_LIMIT = 10
 MAX_TOKENS = 2000
 
-# ===== Redis 缓存 =====
-r = redis.Redis(host="localhost", port=6379, decode_responses=True)
-
-def get_context_version(thread_id: str) -> int:
-    """
-    获取该会话的上下文版本号（= MySQL 里的消息数）。
-    同一个问题在不同上下文里答案可能不同，所以缓存 key 必须带版本号。
-    """
-    conn = pymysql.connect(
-        host="localhost", port=3306, user="root",
-        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM conversations WHERE thread_id = %s",
-                (thread_id,)
-            )
-            count = cur.fetchone()[0]
-    finally:
-        conn.close()
-    return count
-
-def get_cached(thread_id: str, query: str, context_version: int):
-    key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
-    return r.get(key)
-
-def set_cache(thread_id: str, query: str, answer: str, context_version: int, ttl: int = 3600):
-    key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
-    r.set(key, answer, ex=ttl)
-
 # ===== 友好错误提示 =====
 def friendly_error(e: Exception) -> str:
     """
     把异常映射成用户可读的错误提示。
-    不把 str(e) 直接返回客户端（可能泄漏 API key、路径、SQL 结构等内部信息）。
+    用异常类型和 HTTP 状态码判断，不做自然语言子串匹配（避免 rate 匹配到 generate 之类的误判）。
     """
-    msg = str(e).lower()
-    if "authentication" in msg or "401" in msg or "api key" in msg:
+    status = getattr(e, "status_code", None)
+    if status == 401:
         return "模型服务认证失败，请联系管理员"
-    if "timeout" in msg or "timed out" in msg:
-        return "请求超时，请稍后再试"
-    if "rate" in msg or "429" in msg:
+    if status == 429:
         return "请求过于频繁，请稍后再试"
-    if "connection" in msg or "connect" in msg:
-        return "服务暂时不可用，请稍后再试"
+    if isinstance(e, asyncio.TimeoutError):
+        return "请求超时，请稍后再试"
+    if isinstance(e, pymysql.MySQLError):
+        return "存储服务暂时不可用，请稍后再试"
     return "服务暂时不可用，请稍后再试"
 
 # ===== MySQL 对话历史（展示层） =====
 def save_conversation(thread_id: str, role: str, content: str):
     conn = pymysql.connect(
-        host="localhost", port=3306, user="root",
-        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
+        host=os.getenv("MYSQL_HOST", "localhost"),
+        port=int(os.getenv("MYSQL_PORT", "3306")),
+        user=os.getenv("MYSQL_USER", "root"),
+        password=os.getenv("MYSQL_PASSWORD", "root123"),
+        database=os.getenv("MYSQL_DATABASE", "agent"),
+        charset="utf8mb4"
     )
     try:
         with conn.cursor() as cur:
@@ -90,8 +62,12 @@ def save_conversation(thread_id: str, role: str, content: str):
 
 def ensure_table():
     conn = pymysql.connect(
-        host="localhost", port=3306, user="root",
-        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
+        host=os.getenv("MYSQL_HOST", "localhost"),
+        port=int(os.getenv("MYSQL_PORT", "3306")),
+        user=os.getenv("MYSQL_USER", "root"),
+        password=os.getenv("MYSQL_PASSWORD", "root123"),
+        database=os.getenv("MYSQL_DATABASE", "agent"),
+        charset="utf8mb4"
     )
     try:
         with conn.cursor() as cur:
@@ -176,16 +152,6 @@ def root():
 async def chat(payload: ChatRequest):
     thread_id = payload.thread_id
 
-    # 1. 查缓存（key 带上下文版本号）
-    context_version = get_context_version(thread_id)
-    cached = get_cached(thread_id, payload.message, context_version)
-    if cached:
-        print(f"[缓存命中] {payload.message} (v{context_version})")
-        save_conversation(thread_id, "human", payload.message)
-        save_conversation(thread_id, "ai", cached)
-        return ChatResponse(reply=cached)
-
-    # 2. 调 Agent
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": RECURSION_LIMIT,
@@ -198,23 +164,30 @@ async def chat(payload: ChatRequest):
         )
         answer = result["messages"][-1].content
     except Exception as e:
-        # 服务端日志记录完整异常
         print(f"[错误] {type(e).__name__}: {str(e)}")
-        # 客户端只看到友好提示
         raise HTTPException(status_code=500, detail=friendly_error(e))
 
-    # 3. 写缓存（用当前 version）+ 存历史
-    set_cache(thread_id, payload.message, answer, context_version)
-    save_conversation(thread_id, "human", payload.message)
-    save_conversation(thread_id, "ai", answer)
-    print(f"[缓存写入] {payload.message} (v{context_version})")
+    # 写 MySQL（展示层，失败不影响主流程）
+    try:
+        save_conversation(thread_id, "human", payload.message)
+        save_conversation(thread_id, "ai", answer)
+    except Exception as e:
+        print(f"[MySQL 写入失败] {type(e).__name__}: {str(e)}")
+
     return ChatResponse(reply=answer)
 
 @app.get("/history")
 def get_history(thread_id: str = "user_001", limit: int = 20):
+    # limit 上限保护
+    limit = min(limit, 100)
+
     conn = pymysql.connect(
-        host="localhost", port=3306, user="root",
-        password=os.getenv("MYSQL_PASSWORD", "root123"), database="agent", charset="utf8mb4"
+        host=os.getenv("MYSQL_HOST", "localhost"),
+        port=int(os.getenv("MYSQL_PORT", "3306")),
+        user=os.getenv("MYSQL_USER", "root"),
+        password=os.getenv("MYSQL_PASSWORD", "root123"),
+        database=os.getenv("MYSQL_DATABASE", "agent"),
+        charset="utf8mb4"
     )
     try:
         with conn.cursor() as cur:
@@ -286,18 +259,25 @@ async def chat_stream(payload: StreamRequest):
                 yield f"data: {json.dumps({'text': fallback}, ensure_ascii=False)}\n\n"
                 full_answer = fallback
 
-            # 存 MySQL（展示层）
-            save_conversation(thread_id, "human", payload.message)
-            save_conversation(thread_id, "ai", full_answer)
+            # 写 MySQL（展示层，失败不影响主流程）
+            try:
+                save_conversation(thread_id, "human", payload.message)
+                save_conversation(thread_id, "ai", full_answer)
+            except Exception as e:
+                print(f"[MySQL 写入失败] {type(e).__name__}: {str(e)}")
 
+            yield "data: [DONE]\n\n"
+
+        except asyncio.CancelledError:
+            # 客户端断连，不要 yield，直接抛出
+            print("[请求] 客户端断连")
+            raise
         except Exception as e:
-            # 服务端日志记录完整异常
             print(f"[错误] {type(e).__name__}: {str(e)}")
-            # 客户端只看到友好提示
             yield f"data: {json.dumps({'error': friendly_error(e)}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
         finally:
             elapsed = time.time() - start_time
             print(f"[请求] 耗时 {elapsed:.2f} 秒")
-            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
