@@ -15,8 +15,6 @@ venv/
 # 日志
 *.log
 
-# 向量索引（运行时生成）
-faiss_index/
 
 # LangGraph 持久化 checkpointer
 checkpoints.db*
