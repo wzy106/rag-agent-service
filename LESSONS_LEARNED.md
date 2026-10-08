@@ -2,7 +2,7 @@
 
 > 记录项目开发过程中遇到的问题、分析过程和解决方案。
 > 每个故事按"问题 → 分析 → 方案 → 收获"结构。
-> 最后更新：2026-10-08（新增 Docker 部署系列 6 个故事）
+> 最后更新：2026-10-08（新增 Docker 部署系列 7 个故事）
 
 ## 快速索引
 
@@ -29,6 +29,7 @@
 | **依赖下载与平台兼容** | **故事 23、24** |
 | **跨平台 wheel 陷阱** | **故事 25** |
 | **模型缓存与容器** | **故事 26** |
+| **checkpoints 持久化** | **故事 27** |
 
 ---
 
@@ -692,6 +693,9 @@ result = await agent.ainvoke(
 
 ### 收获
 **让框架做框架的事。** LangGraph 的 checkpointer 就是设计来管状态的，不要在外面手动糊一层。生产环境可以无缝升级到 `AsyncPostgresSaver`，业务代码完全不用改。
+
+### 更新（2026-10-08）
+上面的验证只覆盖了**进程重启**，没覆盖**容器重建**。`docker compose down` 后容器销毁，`checkpoints.db` 也丢了。详见故事 27。
 
 ---
 
@@ -1391,7 +1395,8 @@ model_path = str(next(
 - 改成运行时 volume 挂载：`./hf_cache:/root/.cache/huggingface`
 - **但宿主机 `hf_cache/` 是空的** —— 从没跑过下载命令
 
-### 方案
+### 方案（第一版：临时修）
+
 **宿主机先把模型下到 `hf_cache/`**：
 
 ```cmd
@@ -1403,35 +1408,53 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('BAA
 
 下载 192 MB（包含 13 个文件）。**因为 volume 挂载，容器内 `/root/.cache/huggingface/` 就能看到这些文件。**
 
-重启容器：
-```cmd
-docker compose restart agent-api
-docker logs agent-api --tail 30
-```
+### 方案（最终版：三级探测，2026-10-08）
 
-**成功日志**：
-```
-[RAG Server] BM25 索引构建完成，102 个 chunk
-FastMCP 3.4.8 — Server: RAG Knowledge Server
-INFO: Application startup complete.
-```
+**问题升级**：本地修好后，容器里又崩了。原因：
+- MCP Server 是 `api_agent.py` 用 stdio 拉起的**子进程**
+- `MultiServerMCPClient` 起子进程时，环境变量**可能不完整传递**
+- 容器里 `HF_HOME` 为空时，代码 fallback 到项目内 `hf_cache/`（容器里不存在）
 
-### 更好的做法（待做）
-**改代码让 SentenceTransformer 自动下载**，不硬编码路径：
+**改成三级探测**：
 
 ```python
-# 改成：
-from sentence_transformers import SentenceTransformer
-model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
-# SentenceTransformer 会自动从 HF 缓存加载，缓存不存在则下载
+import os
+import sys
+from pathlib import Path
 
-# 或者（如果想显式控制路径）：
-from huggingface_hub import snapshot_download
-model_path = snapshot_download("BAAI/bge-small-zh-v1.5")
-model = SentenceTransformer(model_path)
+# ===== HF 环境初始化（必须在 sentence_transformers 之前）=====
+def _resolve_hf_home() -> str:
+    if os.environ.get("HF_HOME"):           # 1. 显式环境变量
+        return os.environ["HF_HOME"]
+    container_default = Path("/root/.cache/huggingface")
+    if container_default.exists():          # 2. 容器默认挂载点
+        return str(container_default)
+    return str(Path(__file__).resolve().parent.parent / "hf_cache")   # 3. 本地开发
+
+_HF_HOME = _resolve_hf_home()
+os.environ["HF_HOME"] = _HF_HOME
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+# ... import 之后
+
+class LocalEmbeddings(Embeddings):
+    def __init__(self, model_name):
+        # 让 HF 自己根据 HF_HOME 解析缓存
+        self.model = SentenceTransformer(model_name)
+
+embedding = LocalEmbeddings("BAAI/bge-small-zh-v1.5")
 ```
 
-**这样无论宿主机有没有预下载模型，容器首次启动时都能自动拉取。**
+**同时 compose 里加环境变量双保险**：
+
+```yaml
+environment:
+  - HF_ENDPOINT=https://hf-mirror.com
+  - HF_HOME=/root/.cache/huggingface
+  - HF_HUB_OFFLINE=1
+  - TRANSFORMERS_OFFLINE=1
+```
 
 ### 收获
 **不要在代码里硬编码缓存路径。** 让库自己处理缓存逻辑（HF 的 `snapshot_download` 或 `SentenceTransformer` 都会自动管理）。硬编码路径的问题：
@@ -1439,10 +1462,116 @@ model = SentenceTransformer(model_path)
 - 依赖精确的目录结构
 - 出错了不容易发现
 
-**另一个教训**：**Dockerfile 里删了某行 RUN，要检查这行原本"副作用"（下载模型）有没有别的补偿机制。** 我删了 `RUN python -c "...下载模型..."`，改成 volume 挂载，但**忘了让用户先下载**。这是"改动引入新假设"的典型例子。
+**第二个教训**：**Dockerfile 里删了某行 RUN，要检查这行原本"副作用"（下载模型）有没有别的补偿机制。** 我删了 `RUN python -c "...下载模型..."`，改成 volume 挂载，但**忘了让用户先下载**。
+
+**第三个教训**：**MCP 子进程的环境变量可能不完整。** 这是 fastmcp + langchain-mcp-adapters 底层 stdio 传输的一个特点。用**多级探测**（环境变量 > 容器默认路径 > 项目内路径）绕过。
 
 **面试时能讲**：
-> "我 Docker 化时把模型下载从构建期移到了运行时 volume 挂载，避开了网络超时。但改完启动容器直接崩，报 `FileNotFoundError: snapshots 目录不存在`。根因是 MCP Server 里硬编码了 HF 缓存路径，而宿主机 `hf_cache/` 是空的。解决方案是宿主机先跑 `snapshot_download` 把模型下到挂载目录，容器里就能读到了。后来我意识到更好的做法是改代码用 `SentenceTransformer('BAAI/bge-small-zh-v1.5')` 让它自动下载，不要硬编码路径。"
+> "我 Docker 化时把模型下载从构建期移到运行时 volume 挂载。但改完启动容器报 `FileNotFoundError: snapshots 目录不存在`。根因是 MCP Server 硬编码了 HF 缓存路径，而且子进程的环境变量可能不完整。我改成三级探测：环境变量 > 容器默认挂载点 `/root/.cache/huggingface` > 项目内 `hf_cache/`。这样本地和容器都能跑。"
+
+---
+
+## 故事 27：checkpoints.db 无 volume，容器重建丢记忆（2026-10-08）
+
+### 问题
+README 宣传"服务重启不丢历史"，但**只在进程重启场景下成立**。`docker compose down` 后：
+- 容器销毁
+- `rag_api/checkpoints.db` 随之消失
+- 用户的历史对话全丢
+
+**这是一个很容易忽略的边界**：restart ≠ down。
+
+### 分析
+原 `docker-compose.yml` 只挂了一个 volume：
+```yaml
+volumes:
+  - ./hf_cache:/root/.cache/huggingface   # 只挂了 HF 缓存
+  # 缺 checkpoints volume
+```
+
+`api_agent.py` 里的路径：
+```python
+checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+```
+**落在源码目录里，宿主机看不到。**
+
+### 方案
+
+**① 宿主机建目录：**
+```cmd
+mkdir D:\Projects\Agent\data
+```
+
+**② 改 `api_agent.py`：**
+```python
+# checkpointer 持久化路径：优先用 DATA_DIR（容器里由 compose 设定），
+# 否则用 rag_api/data/（本地开发）
+data_dir = Path(os.getenv("DATA_DIR", Path(__file__).resolve().parent / "data"))
+data_dir.mkdir(parents=True, exist_ok=True)
+checkpoint_path = str(data_dir / "checkpoints.db")
+async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+    ...
+```
+
+**③ 改 `docker-compose.yml`：**
+```yaml
+environment:
+  - DATA_DIR=/app/rag_api/data
+volumes:
+  - ./hf_cache:/root/.cache/huggingface
+  - ./data:/app/rag_api/data       # 新增
+```
+
+**④ 把旧的 db 挪到新位置：**
+```cmd
+move rag_api\checkpoints.db data\checkpoints.db
+```
+
+**⑤ `.gitignore` 加 `data/`：**
+```
+data/
+```
+
+### 验证
+```cmd
+:: 1. 问一个问题
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"MMR 是什么？\", \"thread_id\": \"p0b_test\"}"
+
+:: 2. 完全销毁容器
+docker compose down
+
+:: 3. 重建
+docker compose up -d
+
+:: 4. 用代词问
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"它和普通相似度有什么区别？\", \"thread_id\": \"p0b_test\"}"
+```
+
+**第 4 步能理解"它"= MMR → 记忆持久化生效。**
+
+**宿主机 `data/checkpoints.db` 大小会实时变化，证明写入生效。**
+
+### 为什么挂目录，不挂文件
+**不要**用这种写法：
+```yaml
+- ./checkpoints.db:/app/rag_api/checkpoints.db      # ❌ 危险
+```
+
+**原因**：如果宿主机 `./checkpoints.db` 不存在，Docker **会创建一个同名目录**挂进去，导致 SQLite 打不开。挂目录比挂文件稳。
+
+### 收获
+**Docker 持久化有三个层次，缺一不可**：
+1. **代码层**：用环境变量（`DATA_DIR`）决定路径，不用硬编码
+2. **compose 层**：volume 挂载到宿主机
+3. **git 层**：`.gitignore` 忽略运行时文件（`data/`）
+
+**"服务重启不丢"这句话要拆开看**：
+- `docker compose restart` → 只重启进程，容器不销毁，DB 还在容器里 ✅
+- `docker compose down` → 销毁容器，DB 一起消失 ❌
+- `docker compose down && up` → 除非有 volume，否则记忆全丢
+
+**面试时能讲**：
+> "Docker 化的一个坑是 checkpoints 持久化。`AsyncSqliteSaver` 默认把 DB 写在容器内部，`docker compose down` 就全丢了。我的做法是用 `DATA_DIR` 环境变量决定路径，compose 里把 `./data` 挂到 `/app/rag_api/data`。本地开发 fallback 到 `rag_api/data/`。验证过：`docker compose down` 后 `up -d`，用代词问，Agent 还能回忆起上一轮。"
 
 ---
 
@@ -1472,6 +1601,7 @@ model = SentenceTransformer(model_path)
 | **磁盘与 Docker 环境** | **Docker 构建失败先查磁盘空间；WSL2 vhdx 默认在 C 盘要迁走** |
 | **依赖下载与平台兼容** | **CPU 版 torch 能砍 90% 下载量；容器内下载比宿主机稳** |
 | **跨平台 wheel 陷阱** | **wheel 是平台相关的，宿主机给容器下 wheel 必须指定 `--platform`** |
-| **模型缓存与容器** | **别硬编码 HF 缓存路径；volume 挂载需要宿主机先备好数据** |
+| **模型缓存与容器** | **别硬编码 HF 缓存路径；三级探测让本地和容器都能跑** |
+| **checkpoints 持久化** | **`docker compose down` 会丢记忆，必须挂 volume 到宿主机** |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**

@@ -26,6 +26,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 记忆层：
 - LangGraph checkpointer（唯一真相源）
 - AsyncSqliteSaver 持久化到 SQLite 文件（重启不丢）
+- checkpoints.db 挂载到宿主机 ./data/，容器重建也不丢
 - MySQL 只做展示层（给 /history 接口用）
 
 缓存层：
@@ -58,6 +59,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 | `eval/` | RAG 评估脚本 + 测试集 |
 | `faiss_index/` | FAISS 索引（204 KB + 44 KB，已提交进 Git） |
 | `hf_cache/` | HuggingFace 模型缓存（volume 挂载进容器，不提交） |
+| `data/` | checkpoints.db 持久化目录（volume 挂载，不提交） |
 | `first_test/` | 早期手写 Agent 练习 |
 | `langchain_test/` | LangChain 组件学习 |
 | `langgraph_test/` | LangGraph 状态图学习 |
@@ -83,7 +85,9 @@ uvicorn api_agent:app --reload
 ```bash
 # 1. 首次使用前：本地下载 embedding 模型到 hf_cache/
 #    （模型 192 MB，避免容器内首次启动时再下载）
-python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-small-zh-v1.5')"
+#    注意：必须指定 cache_dir，否则默认写到 ~/.cache/huggingface，
+#    容器 volume 挂载的 ./hf_cache/ 会是空的
+python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-small-zh-v1.5', cache_dir='hf_cache/hub')"
 
 # 2. 构建并启动（首次约 5~10 分钟）
 docker compose up --build -d
@@ -214,7 +218,6 @@ python eval_retrieval.py
 - 评估是**文档级召回**而非 chunk 级，样本 30 条偏少，且缺端到端指标
 - 流式状态机用布尔变量表达，边界情况可能出错
 - 未实现 Rerank 精排
-- MCP Server 硬编码了 HF 缓存路径，换环境需要手工准备 `hf_cache/`
 
 ## 学习路径
 

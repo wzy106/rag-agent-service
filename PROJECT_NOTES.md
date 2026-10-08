@@ -2,7 +2,7 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
-> 最后更新：2026-10-08（Docker 部署问题闭环）
+> 最后更新：2026-10-08（Docker 部署问题闭环 + checkpoints 持久化）
 
 ## 一、项目简介（30 秒版本）
 
@@ -52,6 +52,7 @@ FastAPI（api_agent.py）
 记忆层：
 - LangGraph checkpointer 按 thread_id 管状态（唯一真相源）
 - AsyncSqliteSaver 持久化到 SQLite 文件（重启不丢）
+- checkpoints.db 挂载到宿主机 ./data/（容器重建也不丢）
 - MySQL 只做展示层（给 /history 接口用）
 
 缓存层：
@@ -93,6 +94,7 @@ FastAPI（api_agent.py）
 - **Docker 多阶段构建**（镜像从 3.51 GB 降到 2.42 GB）
 - **CPU 版 torch**（下载量从 5 GB 降到 600 MB）
 - **模型缓存 volume 挂载**（`hf_cache/` 挂宿主机，重建不重下）
+- **checkpoints volume 挂载**（`data/` 挂宿主机，容器重建不丢记忆）
 
 ## 五、RAG 完整链路（面试重点）
 
@@ -129,8 +131,8 @@ chunks = splitter.split_documents(documents)
 
 ```python
 class LocalEmbeddings(Embeddings):
-    def __init__(self, model_path):
-        self.model = SentenceTransformer(model_path)
+    def __init__(self, model_name):
+        self.model = SentenceTransformer(model_name)
     def embed_documents(self, texts):
         return self.model.encode(texts).tolist()
     def embed_query(self, text):
@@ -140,6 +142,7 @@ class LocalEmbeddings(Embeddings):
 - 用本地 `BAAI/bge-small-zh-v1.5` 模型，512 维
 - 封装成 LangChain 的 `Embeddings` 接口
 - 完全离线，不消耗 API
+- **HF 缓存路径由 `HF_HOME` 环境变量控制**（三级探测，见面试题 21）
 
 ### 4. 向量库 + 持久化
 
@@ -308,7 +311,7 @@ def search_knowledge(query: str) -> str:
 | uvicorn --reload 下调 asyncio.run 报错 | 事件循环嵌套 | 改用 FastAPI lifespan 异步钩子 |
 | MCP 工具同步调用报错 | MCP 工具是异步的 | Agent 改用 astream / ainvoke |
 | stream 输出吞进中间步骤 | 工具调用前的英文思考也被流式输出 | 记录 tool 节点位置，只输出它之后的内容 |
-| Docker 构建慢 | 模型下载 + 依赖安装 | 分层缓存，模型下载放独立层 |
+| Docker 构建慢 | 模型下载 + 依赖安装 | 分层缓存；模型下载移出构建期 |
 | MCP Server 里的 print 看不到 | MCP 协议占用 stdout | 改成输出到 stderr |
 | 等权混合检索反而变差 | RRF 奖励两路都出现的文档，BM25 判断错会被放大 | 加权 RRF（向量 0.7 / BM25 0.3） |
 | 多轮对话缓存串台 | 同一问题在不同上下文答案不同 | 缓存 key 加 thread_id |
@@ -324,8 +327,8 @@ def search_knowledge(query: str) -> str:
 | **Docker 数据占满 C 盘 57 GB** | WSL2 vhdx 默认存在 C 盘 | Settings → Resources → Disk image location 改到 `D:\Docker` |
 | **pip 清华源 ReadTimeout** | 容器内下载 CUDA 全家桶（triton 248MB、cudnn 500MB、nccl 200MB） | 换阿里云源 + 长超时 + 重试；再用 CPU 版 torch 砍掉 CUDA 全家桶 |
 | **Windows wheel 不能给 Linux 容器用** | 宿主机是 `win_amd64` + `cp314`，容器是 `manylinux` + `cp312` | wheelhouse 作废，改用容器内直接下载 CPU 版 |
-| **MCP Server 硬编码 HF 缓存路径** | 代码写死 `Path.home()/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots` | 宿主机先 `snapshot_download` 到 `hf_cache/`，volume 挂载进容器 |
-| **Docker 容器内本地模型缺失** | Dockerfile 删了构建期下载模型的 RUN 行，但没有 volume 挂载 | docker-compose 加 `./hf_cache:/root/.cache/huggingface` |
+| **MCP Server 硬编码 HF 缓存路径** | 代码写死 `Path.home()/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots` | 改成三级探测（环境变量 > 容器默认挂载点 > 项目 hf_cache） |
+| **checkpoints.db 无 volume** | DB 存在容器内部，`docker compose down` 后记忆全丢 | compose 加 `./data:/app/rag_api/data`，代码用 `DATA_DIR` 环境变量 |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -467,7 +470,9 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global agent
-    checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+    data_dir = Path(os.getenv("DATA_DIR", Path(__file__).resolve().parent / "data"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = str(data_dir / "checkpoints.db")
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
         agent = create_agent(
             model, tools=tools,
@@ -491,18 +496,20 @@ result = await agent.ainvoke(
 | `AsyncSqliteSaver` | 持久化 checkpointer，存 SQLite 文件 |
 | `checkpointer=saver` | 把存储器挂到 Agent |
 | `thread_id` | 区分不同会话，相同 ID 共享历史 |
+| `DATA_DIR` | 决定 DB 路径，本地/容器两套值 |
 
 **只需要传当前这一轮的消息**，Agent 会自动从 checkpointer 加载历史。
 
 **测试验证**：
 1. `test_001` 问"MMR 是什么？" → 正常回答
-2. **重启服务**
-3. `test_001` 问"它和普通相似度检索有什么区别？" → 仍能理解"它"指 MMR ✅
+2. **`docker compose down` 完全销毁容器**
+3. `docker compose up -d` 重建
+4. `test_001` 问"它和普通相似度检索有什么区别？" → 仍能理解"它"指 MMR ✅
 
 **生产优化**：AsyncSqliteSaver 换 `PostgresSaver`，支持多实例共享。
 
 **面试话术**：
-> "我的记忆用 LangGraph 的 checkpointer 做唯一真相源，持久化用 AsyncSqliteSaver（生产环境会换 PostgresSaver）。每次请求只传当前这一轮的消息，Agent 自动从 checkpointer 加载该 thread_id 的历史。之前我试过手动从 MySQL 加载历史拼进 messages，但发现和 checkpointer 的 state 会打架——消息格式混用、历史可能重复累积。后来统一到 checkpointer，MySQL 只做展示层给 /history 接口用。"
+> "我的记忆用 LangGraph 的 checkpointer 做唯一真相源，持久化用 AsyncSqliteSaver（生产环境会换 PostgresSaver）。每次请求只传当前这一轮的消息，Agent 自动从 checkpointer 加载该 thread_id 的历史。之前我试过手动从 MySQL 加载历史拼进 messages，但发现和 checkpointer 的 state 会打架——消息格式混用、历史可能重复累积。后来统一到 checkpointer，MySQL 只做展示层给 /history 接口用。另外我把 checkpoints.db 挂到宿主机的 ./data/，这样 docker compose down 后容器重建也不丢。"
 
 ### 13. 检索不到内容怎么处理？
 
@@ -580,7 +587,7 @@ def friendly_error(e: Exception) -> str:
 - 文档库扩充到几百个文件，让不同检索策略的差异更明显
 - 加 chunk 级评估（不只是文档级）
 
-### 17. Docker 构建失败怎么排查？（新增）
+### 17. Docker 构建失败怎么排查？
 
 **案发现场**：
 ```
@@ -605,7 +612,7 @@ failed to solve: Unavailable: error reading from server: EOF
 **面试话术**：
 > "Docker 构建报 `unpigz corrupted` 这种错误，第一反应要查磁盘空间，不是改代码。我当时 C 盘 0 字节，Docker 在 unpacking 阶段写不进去才报的这个错。后来把 Docker 数据从 C 盘迁到 D 盘，问题解决。"
 
-### 18. 为什么 pip 突然开始超时？（新增）
+### 18. 为什么 pip 突然开始超时？
 
 **触发点**：我改 Dockerfile 时，pip 命令加了 `--prefix=/install`，Docker 层缓存失效，必须重新下载所有依赖。
 
@@ -621,7 +628,7 @@ failed to solve: Unavailable: error reading from server: EOF
 **面试话术**：
 > "pip 超时有时候不是网络问题，是缓存失效。我改了 pip 命令的一个参数，导致 Docker 层缓存失效，本来命中的缓存都要重新下载 5 GB 的 CUDA 全家桶。后来用 CPU 版 torch 把下载量砍到 600 MB。"
 
-### 19. Windows 下载的 wheel 能给 Linux 容器用吗？（新增）
+### 19. Windows 下载的 wheel 能给 Linux 容器用吗？
 
 **不能。** 三个维度都必须匹配：
 
@@ -637,7 +644,7 @@ failed to solve: Unavailable: error reading from server: EOF
 
 **教训**：**别在宿主机给容器下 wheel**，除非用 `pip download --platform manylinux2014_x86_64 --python-version 3.12 --only-binary=:all:` 明确指定平台。
 
-### 20. 多阶段构建的好处是什么？（新增）
+### 20. 多阶段构建的好处是什么？
 
 ```dockerfile
 # Stage 1: builder
@@ -656,6 +663,67 @@ COPY --from=builder /install /usr/local   # 只拷依赖，不拷编译器
 - 镜像更小（3.51 GB → 2.42 GB）
 
 **代价**：构建时间稍长（多一次 stage），但镜像拉取/推送更快。
+
+### 21. Docker 容器重建后，LangGraph 的记忆会丢吗？
+
+**会，如果不做持久化。**
+
+`AsyncSqliteSaver` 默认把 `checkpoints.db` 写到容器内部，`docker compose down` 一销毁就全没了。README 里说"服务重启不丢历史"，对**进程重启**成立，对**容器重建**不成立——这是一个很容易忽略的边界。
+
+**修法**：把 checkpoints 目录挂载到宿主机。
+
+```python
+# api_agent.py：用 DATA_DIR 环境变量决定路径
+data_dir = Path(os.getenv("DATA_DIR", Path(__file__).resolve().parent / "data"))
+data_dir.mkdir(parents=True, exist_ok=True)
+checkpoint_path = str(data_dir / "checkpoints.db")
+async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+    ...
+```
+
+```yaml
+# docker-compose.yml：加 volume + 环境变量
+environment:
+  - DATA_DIR=/app/rag_api/data
+volumes:
+  - ./data:/app/rag_api/data
+```
+
+**验证方法**：
+1. 问一个问题
+2. `docker compose down`（完全销毁容器）
+3. `docker compose up -d`
+4. 用代词问（"它和普通相似度有什么区别？"）→ 能理解"它"指上一轮的 MMR ✅
+
+**宿主机 `data/checkpoints.db` 大小会实时变化**，证明写入生效。
+
+**为什么不直接挂载 `./checkpoints.db:/app/rag_api/checkpoints.db`**：如果宿主机文件不存在，Docker 会**创建一个同名目录**挂进去，导致 SQLite 打不开。挂目录比挂文件稳。
+
+**面试话术**：
+> "Docker 化的一个坑是 checkpoints 持久化。`AsyncSqliteSaver` 默认把 DB 写在容器内部，`docker compose down` 就全丢了。我的做法是用 `DATA_DIR` 环境变量决定路径，compose 里把 `./data` 挂到 `/app/rag_api/data`。本地开发 fallback 到 `rag_api/data/`。验证过：`docker compose down` 后 `up -d`，用代词问，Agent 还能回忆起上一轮。"
+
+### 22. 为什么要让 HF_HOME 三级探测？
+
+**问题**：MCP Server 是 `api_agent.py` 用 stdio 拉起的**子进程**，`MultiServerMCPClient` 起子进程时环境变量可能不完整传递，导致容器里 `HF_HOME` 为空，代码 fallback 到项目内 `hf_cache/`（容器里不存在），最终 `FileNotFoundError`。
+
+**解法**：
+
+```python
+def _resolve_hf_home() -> str:
+    if os.environ.get("HF_HOME"):           # 1. 显式环境变量
+        return os.environ["HF_HOME"]
+    container_default = Path("/root/.cache/huggingface")
+    if container_default.exists():          # 2. 容器默认挂载点
+        return str(container_default)
+    return str(Path(__file__).resolve().parent.parent / "hf_cache")   # 3. 本地开发
+```
+
+**为什么不硬编码**：硬编码 `Path.home()/.cache/huggingface/.../snapshots` 依赖精确的目录结构，换环境必崩，且不易发现。
+
+**为什么不只用环境变量**：子进程可能拿不到，本地开发时也常常忘了设。
+
+**面试话术**：
+> "我 Docker 化时把模型下载从构建期移到运行时 volume 挂载。但改完启动容器报 `FileNotFoundError: snapshots 目录不存在`。根因是 MCP Server 硬编码了 HF 缓存路径，而且子进程的环境变量可能不完整。我改成三级探测：环境变量 > 容器默认挂载点 `/root/.cache/huggingface` > 项目内 `hf_cache/`。这样本地和容器都能跑。"
 
 ## 八、项目数据（面试时能报的具体数字）
 
@@ -678,6 +746,8 @@ COPY --from=builder /install /usr/local   # 只拷依赖，不拷编译器
 - C 盘可用空间：10.20 GB → **65.25 GB**
 - pip 下载量：3~5 GB（CUDA）→ **~600 MB**（CPU）
 - FAISS 索引：已提交 Git（248 KB）
+- checkpoints 持久化：`./data/checkpoints.db`（volume 挂载，容器重建不丢）
+- data/ 目录：`.gitignore` 已忽略
 
 ## 九、可演示的操作
 
@@ -685,7 +755,7 @@ COPY --from=builder /install /usr/local   # 只拷依赖，不拷编译器
 2. 测普通对话：POST /chat
 3. 测流式对话：POST /chat/stream
 4. 查看对话历史：GET /history?thread_id=user_001
-5. **演示持久化记忆**：问"MMR 是什么" → **重启服务** → 问"它和普通相似度有什么区别" → 仍能理解
+5. **演示持久化记忆**：问"MMR 是什么" → **`docker compose down` 完全销毁容器** → `up -d` → 问"它和普通相似度有什么区别" → 仍能理解
 6. 演示会话隔离：换 thread_id 问"它是什么"
 7. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
 8. 用浏览器打开 client.html，看打字机效果
@@ -861,7 +931,9 @@ class ChatResponse(BaseModel):
 async def lifespan(app: FastAPI):
     global agent
     ...
-    checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+    data_dir = Path(os.getenv("DATA_DIR", Path(__file__).resolve().parent / "data"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = str(data_dir / "checkpoints.db")
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
         agent = create_agent(model, tools=tools, checkpointer=saver, ...)
         ensure_table()
@@ -1017,12 +1089,14 @@ config = {"recursion_limit": RECURSION_LIMIT}
 
 **问题**：`InMemorySaver` 是进程内存，服务重启后记忆丢失。手动从 MySQL 加载历史又和 checkpointer 打架。
 
-**方案**：用 `AsyncSqliteSaver` 做持久化 checkpointer。
+**方案**：用 `AsyncSqliteSaver` 做持久化 checkpointer，路径由 `DATA_DIR` 决定。
 
 ```python
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+data_dir = Path(os.getenv("DATA_DIR", Path(__file__).resolve().parent / "data"))
+data_dir.mkdir(parents=True, exist_ok=True)
+checkpoint_path = str(data_dir / "checkpoints.db")
 async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
     agent = create_agent(
         model, tools=tools,
@@ -1038,6 +1112,8 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 | 记忆源 | InMemorySaver + MySQL 手动拼 | AsyncSqliteSaver（唯一真相源） |
 | MySQL | 记忆源 | 降级为展示层（给 /history 用） |
 | 消息格式 | OpenAI dict 手动拼 | 统一交给 LangGraph |
+| DB 路径 | 硬编码在源码目录 | `DATA_DIR` 环境变量，本地/容器两套值 |
+| 容器重建 | DB 丢失 | volume 挂载，不丢 |
 
 ### 10. 面试高频问题
 
@@ -1050,7 +1126,8 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 | SSE 格式是什么？ | `data: 内容\n\n`，结束发 `[DONE]` |
 | 为什么 [DONE] 不能放 finally？ | 客户端断连时 aclose() 抛 GeneratorExit，finally 里 yield 会抛 RuntimeError |
 | Agent 死循环怎么防？ | `recursion_limit=10` + `max_tokens=2000` |
-| Agent 多轮对话怎么实现？ | LangGraph checkpointer + AsyncSqliteSaver |
+| Agent 多轮对话怎么实现？ | LangGraph checkpointer + AsyncSqliteSaver + DATA_DIR |
+| 容器重建后记忆怎么不丢？ | checkpoints volume 挂载到宿主机 ./data/ |
 | 错误信息怎么处理？ | `friendly_error` 映射，用异常类型判断 |
 | 检索不到内容怎么处理？ | 距离阈值降级，返回"没找到"，不调 LLM |
 | RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 |
@@ -1172,6 +1249,8 @@ def evaluate_full(search_fn, name, k=3):
 | 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` 做来源判断 + 显式状态机 |
 | MCP Server 用了私有 API | `vectorstore.docstore._dict` 是内部 API，版本升级可能坏 | 构建索引时自己维护 chunks 列表并 pickle 落盘 |
 | ~~Docker 部署~~ | ~~Dockerfile 缺 COPY docs/，compose 缺 network，host 写死 localhost~~ | ✅ 2026-10-08 已修复 |
+| ~~HF 缓存路径硬编码~~ | ~~`Path.home()/.cache/huggingface/...` 依赖精确路径~~ | ✅ 2026-10-08 已修复：三级探测 |
+| ~~checkpoints 无 volume~~ | ~~`docker compose down` 后记忆全丢~~ | ✅ 2026-10-08 已修复：挂载到 `./data/` |
 
 ### 改进方案
 
@@ -1185,17 +1264,18 @@ def evaluate_full(search_fn, name, k=3):
 | Docker 多阶段构建 | 3.51 GB → 2.42 GB | ✅ 已做 |
 | CPU 版 torch | 下载量 5 GB → 600 MB | ✅ 已做 |
 | 模型缓存 volume 挂载 | 重建不重下 | ✅ 已做 |
+| checkpoints volume 挂载 | 容器重建不丢记忆 | ✅ 已做 |
+| HF_HOME 三级探测 | 本地/容器都能跑 | ✅ 已做 |
 | Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ⏳ 待做 |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
 | 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
 | 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
-| MCP Server 自动下载模型 | 改硬编码路径为 SentenceTransformer 自动加载 | ⏳ 待做 |
 
 ### 面试答题模板
 
 > "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标：召回率、精确率、MRR、多样性。实测发现精确率和多样性呈 trade-off：纯相似度精确率 0.87、多样性 1.37；MMR+去重多样性 1.57、精确率 0.77。MRR 三种策略都在 0.96 以上，Top-1 都很准。我还算过随机基线——从 102 个 chunk 里随便抽 3 个，召回率 84.1%。这说明我的测试集判别力不够，下一步要扩到 200 条 + chunk 级标注。"
 
-## 十四、Docker 部署完整方案（新增，面试重点）
+## 十四、Docker 部署完整方案（面试重点）
 
 ### 14.1 最终 Dockerfile
 
@@ -1263,14 +1343,22 @@ services:
     env_file:
       - .env
     environment:
-      - MYSQL_HOST=mysql           # 容器内必须用服务名，不能用 localhost
+      # 容器内 localhost 指容器自己，必须用服务名 mysql
+      - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=root
       - MYSQL_DATABASE=agent
       - HF_ENDPOINT=https://hf-mirror.com
       - HF_HOME=/root/.cache/huggingface
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      # checkpointer 持久化目录（挂载到宿主机 ./data）
+      - DATA_DIR=/app/rag_api/data
     volumes:
-      - ./hf_cache:/root/.cache/huggingface   # 模型缓存挂载，避免每次重建都下载
+      # 模型缓存挂载到宿主机，避免每次重建都重新下载
+      - ./hf_cache:/root/.cache/huggingface
+      # LangGraph checkpointer 持久化，避免容器重建时记忆丢失
+      - ./data:/app/rag_api/data
     depends_on:
       - mysql
     networks:
@@ -1309,10 +1397,12 @@ torch
 | 20:30 | 重启容器 | `Application startup complete.` ✅ |
 | 20:35 | 端到端测试（chat / stream / 多轮记忆） | 全过 ✅ |
 | 20:40 | Git 提交 + 推送 | 3 个 commit |
+| 21:00 | 发现 `docker compose down` 后记忆全丢 | checkpoints 无 volume |
+| 21:10 | 改 `DATA_DIR` + compose 加 volume | 跨容器重建记忆保留 ✅ |
 
 ### 14.5 面试话术（Docker 部署）
 
-> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要 bge-small-zh-v1.5 模型，我把它下到宿主机 `hf_cache/` 然后 volume 挂载进容器，避免每次重建都重新下模型。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
+> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要 bge-small-zh-v1.5 模型，我把它下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
 
 ## 十五、项目新增数据（更新）
 
@@ -1326,15 +1416,16 @@ torch
 - 镜像平台：Linux/amd64（`manylinux` wheel，Python 3.12 `cp312`）
 - 宿主机平台：Windows/amd64（`win_amd64` wheel，Python 3.14 `cp314`）
   - **注意**：两者不通用，宿主机下 wheel 给容器用是错的
+- checkpoints 持久化：`./data/checkpoints.db`（volume 挂载）
 
 ### Git 仓库状态（2026-10-08）
 
 - 新增 commit：
-  - `b5afdde` build: 多阶段构建 + CPU 版 torch + hf_cache 挂载
-  - `32d1eb8` chore: 忽略 hf_cache、wheelhouse、IDE 配置等构建产物
-  - `0ad3490` chore: 提交 FAISS 索引（248KB），clone 后可直接构建
+  - `d7967f6` docs: 更新复盘笔记与 README，补充 Docker 部署和踩坑经验
+  - `6f9f286` fix: 修复 HF 缓存路径和 checkpoints 持久化
 - `.gitignore` 关键规则：
   - `hf_cache/`（模型缓存，192 MB+）
+  - `data/`（checkpoints 持久化目录）
   - `wheelhouse/`（Docker wheel 缓存）
   - `checkpoints.db*` `*.sqlite` `*.sqlite3`（运行时数据库）
   - `faiss_index/` **已移除**（索引只有 248 KB，提交进仓库让 clone 后可直接构建）
@@ -1355,7 +1446,8 @@ torch
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
-- 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
+- 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，容器重建不丢）
+- checkpoints 持久化：`./data/checkpoints.db`（volume 挂载）
 - 缓存：暂时没有（已删 Redis，命中率结构性为 0）
 - Redis：依赖保留，预留做限流
 - 错误处理：`friendly_error` 用异常类型映射，不泄漏内部信息
