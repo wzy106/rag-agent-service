@@ -2,6 +2,7 @@
 
 > 记录项目开发过程中遇到的问题、分析过程和解决方案。
 > 每个故事按"问题 → 分析 → 方案 → 收获"结构。
+> 最后更新：2026-10-08（新增 Docker 部署系列 6 个故事）
 
 ## 快速索引
 
@@ -12,7 +13,7 @@
 | 网络问题 | 故事 3 |
 | 异步编程 | 故事 4、5 |
 | 用户体验 | 故事 6 |
-| 构建优化 | 故事 7 |
+| 构建优化 | 故事 7、26 |
 | 协议理解 | 故事 8 |
 | 检索算法 | 故事 9、10 |
 | 生产级意识 | 故事 11 |
@@ -24,6 +25,10 @@
 | 安全防护 | 故事 18 |
 | 缓存正确性 | 故事 19 |
 | 依赖管理 | 故事 20 |
+| **磁盘与 Docker 环境** | **故事 21、22** |
+| **依赖下载与平台兼容** | **故事 23、24** |
+| **跨平台 wheel 陷阱** | **故事 25** |
+| **模型缓存与容器** | **故事 26** |
 
 ---
 
@@ -266,6 +271,9 @@ COPY rag_api/api_agent.py ./rag_api/
 
 ### 收获
 Dockerfile 的指令顺序影响构建效率。把变化频率低的放前面，充分利用层缓存。
+
+### 更新（2026-10-08）
+本次构建又踩了新坑——把模型下载放在构建期会导致网络不稳定时构建失败。**最终方案**：模型下载移出构建期，改由运行时 volume 挂载 `hf_cache`。详见故事 26。
 
 ---
 
@@ -1064,6 +1072,380 @@ rank-bm25>=0.2.2
 
 ---
 
+## 故事 21：Docker 构建报 `unpigz corrupted`（2026-10-08）
+
+### 问题
+Docker 构建到 `exporting to image` / `unpacking to image` 阶段突然失败：
+
+```text
+#16 exporting to image
+#16 unpacking to docker.io/library/agent-agent-api:latest
+#16 ERROR: failed to extract layer sha256:f7dfae7ab81225ebfe4b866133d90a08b596073e07813dcada89a0823070199d: 
+    exit status 1: unpigz: skipping: <stdin>: corrupted -- incomplete deflate data
+failed to solve: Unavailable: error reading from server: EOF
+```
+
+### 分析
+- 报错位置在 `unpacking`（写盘阶段），不是编译阶段 → **不是代码问题，是环境问题**
+- 报错关键词 `corrupted -- incomplete deflate data` → 写入被截断
+- 第一反应查磁盘：
+  ```powershell
+  Get-PSDrive C
+  # 结果：C 盘 200 GB，Free 0.00 GB ← 命中
+  wsl -d docker-desktop df -h
+  # 结果：/mnt/host/c 200.0G 200.0G 0 100% ← 确认
+  ```
+- Docker 解压镜像层时要往 C 盘写数据，**C 盘一个字节都写不进去**，管道被截断
+
+### 方案
+1. **清 C 盘**（管理员 PowerShell）：
+   ```powershell
+   cleanmgr /sageset:1    # 弹出窗口，全勾
+   cleanmgr /sagerun:1
+
+   Remove-Item "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force
+   Remove-Item "$env:TEMP\*" -Recurse -Force
+   Remove-Item "$env:USERPROFILE\.cache\huggingface" -Recurse -Force
+   pip cache purge
+   ```
+   清出约 10 GB。
+
+2. **把 Docker 数据迁到 D 盘**（见故事 22）。
+
+### 为什么是"磁盘满"而不是"改代码"
+`unpigz corrupted` 和 `incomplete deflate data` 这种错误，**永远是 I/O 层面的问题**，不是程序 bug。看到这类错误，排查顺序应该是：
+1. 磁盘空间
+2. 磁盘 I/O 故障（坏道、文件系统损坏）
+3. 网络传输中断（如果在 pull 阶段）
+4. Docker 缓存损坏
+
+**先查磁盘，再查别的。**
+
+### 收获
+**Docker 构建失败的第一排查项是磁盘空间。** 尤其在中国 Windows 环境下，C 盘经常被一堆缓存、Docker 虚拟磁盘、HuggingFace 模型吃满。**磁盘满时，各种"看似离奇"的构建报错都可能是写盘失败导致的。**
+
+---
+
+## 故事 22：Docker 数据从 C 盘迁到 D 盘（2026-10-08）
+
+### 问题
+故事 21 里，清出 10 GB 后 C 盘还是不够——因为 **Docker 的 WSL2 虚拟磁盘 (`ext4.vhdx`) 默认存在 C 盘**，占了 **55.7 GB**。每次构建镜像都会往这个 vhdx 里写，越写越大。
+
+### 分析
+- Docker Desktop 在 Windows 上用 WSL2 后端
+- WSL2 的虚拟磁盘默认在 `C:\Users\<user>\AppData\Local\Docker\wsl\`
+- 这个 vhdx 是**动态扩容**的，但**不会自动缩容**——删了的镜像不会立即释放空间
+- 加上 Docker 构建缓存，很容易撑到几十 GB
+
+### 方案
+**Docker Desktop 内置了 GUI 迁移功能**：
+
+1. 托盘图标 → Docker Desktop → **Settings** → **Resources** → **Advanced**
+2. 找到 **Disk image location**
+3. 改成 `D:\Docker`（提前手动建好目录）
+4. 点 **Apply & Restart**
+5. 等它自动迁移 vhdx（几分钟到十几分钟）
+
+**结果**：
+```
+C 盘：10.20 GB → 65.25 GB
+D:\Docker：55.73 GB
+```
+
+### 为什么不用其他方法
+- **`wsl --export` + `wsl --import`**：能迁，但会丢 Docker 的元数据，镜像/容器可能全没
+- **`Optimize-VHD`**：Windows Home 版没有 Hyper-V 模块，跑不了
+- **`docker system prune -a`**：只清镜像和缓存，不动 vhdx 本身
+- **GUI 迁移**：官方路径，保留数据，不动 Docker 状态
+
+### 顺手：项目也搬到 D 盘
+```cmd
+Move-Item "C:\Users\wzyls\Desktop\Agent" "D:\Projects\Agent"
+```
+失败（被 Docker 进程占用）时用 `robocopy`：
+```cmd
+robocopy "C:\Users\wzyls\Desktop\Agent" "D:\Projects\Agent" /E /MOVE /R:0 /W:0
+```
+
+### 收获
+**Docker 数据默认在 C 盘，长期使用会撑爆系统盘。** 装机时第一件事就是改 Disk image location 到其他盘。C 盘紧张时，这个操作能一步腾出几十 GB。
+
+**面试时能讲**：
+> "我遇到过 Docker 构建报 `unpigz corrupted`，一开始以为是网络问题，后来查 C 盘发现已经 0 字节。根因是 Docker 的 WSL2 虚拟磁盘默认在 C 盘，占了 55 GB。解决方案是在 Docker Desktop 的 Settings 里改 Disk image location 到 D 盘，一键迁移，C 盘从 10 GB 恢复到 65 GB。"
+
+---
+
+## 故事 23：pip 清华源突然超时（2026-10-08）
+
+### 问题
+改完 Dockerfile 重新构建，pip 下载突然开始超时：
+
+```text
+ReadTimeoutError: HTTPSConnectionPool(host='pypi.tuna.tsinghua.edu.cn', port=443): 
+Read timed out.
+```
+
+**但"之前明明不超时"** —— 之前同样用清华源，构建成功过。
+
+### 分析
+分两层看：
+
+**第一层：为什么"之前不超时"？**
+- 之前构建的镜像里，`RUN pip install` 这一层的 hash 命中缓存
+- Docker 看到这一层和上次完全一样，直接 `CACHED`
+- **pip 根本没走网络**，所以不会超时
+
+**第二层：为什么"这次超时"？**
+- 我改 Dockerfile 时把 pip 命令从：
+  ```
+  pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+  ```
+  改成：
+  ```
+  pip install --no-cache-dir --prefix=/install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+  ```
+- **多了 `--prefix=/install` 五个字**，Docker 认为"命令变了"，缓存失效
+- 必须从零下载所有依赖，包括 **CUDA 全家桶 3~5 GB**
+- 清华源在下载超大包（triton 248 MB、cudnn 500 MB）时容易超时
+
+### 方案
+1. **换阿里云源**（比清华稳定）：
+   ```
+   -i https://mirrors.aliyun.com/pypi/simple/
+   --trusted-host mirrors.aliyun.com
+   ```
+2. **加超时和重试参数**：
+   ```
+   --timeout 300
+   --retries 10
+   ```
+3. **根本解法**：用 CPU 版 torch（见故事 24），下载量从 5 GB 砍到 600 MB
+
+### 收获
+**"为什么之前不超时？"要分两层思考**：
+- 表层：网络抖动
+- 深层：Docker 层缓存失效，让之前"不联网"的操作变成了"联网"
+
+**改 Dockerfile 里任何命令的细微参数，都可能导致整层缓存失效。** 改之前想清楚：这一层是不是高频变动？能不能拆出来？
+
+**另一个教训**：不要默认"之前能用现在也能用"。**"之前能用"往往只是因为缓存命中了。**
+
+---
+
+## 故事 24：CPU 版 torch vs CUDA 版（2026-10-08）
+
+### 问题
+用默认的 `pip install torch` 会拉**CUDA 全家桶**：
+
+| 包 | 大小 |
+|---|---|
+| torch | ~900 MB |
+| triton | 248 MB |
+| nvidia-cudnn-cu13 | ~500 MB |
+| nvidia-nccl-cu13 | ~200 MB |
+| nvidia-nvshmem-cu13 | ~100 MB |
+| nvidia-cusparselt-cu13 | ~100 MB |
+| **合计** | **3~5 GB** |
+
+**下载 5 GB 在镜像源上很容易超时。**
+
+### 分析
+- 本项目只用 **bge-small-zh-v1.5**（24 MB 小模型）做 embedding
+- RAG 检索走 FAISS（CPU）
+- LLM 推理走 DeepSeek API（云端，不在容器里跑）
+- **容器里唯一用 torch 的地方就是 embedding，CPU 毫秒级**
+- **装 CUDA 全家桶是杀鸡用牛刀**
+
+### 方案
+在 `requirements.txt` 顶部加两行：
+```
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+```
+
+**原理**：PyTorch 官方 CPU 源里 torch 版本是 `2.x.x+cpu`。按 PEP 440 版本规则，`2.9.0+cpu > 2.9.0`，**pip 会自动选 CPU 版**。
+
+### 效果对比
+
+| 项目 | CUDA 版 | CPU 版 |
+|---|---|---|
+| torch | 900 MB + 一堆 CUDA 依赖 | **126 MB** |
+| triton | 248 MB | **不装** |
+| nvidia-cudnn-cu13 | ~500 MB | **不装** |
+| nvidia-nccl-cu13 | ~200 MB | **不装** |
+| nvidia-nvshmem-cu13 | ~100 MB | **不装** |
+| **总下载量** | **3~5 GB** | **~600 MB** |
+| **镜像大小** | 3.51 GB | **2.42 GB** |
+
+### 为什么这么选
+- **性能需求**：本项目用不到 GPU，CPU 版完全够用
+- **下载稳定**：600 MB 在 300 秒超时内稳定完成
+- **镜像小**：少了 1.1 GB
+- **构建快**：从 33 分钟降到 5~10 分钟
+
+### 收获
+**装依赖前先问："这个项目真的需要 GPU 吗？"** 很多 RAG / Agent 项目只是用 embedding 模型，CPU 完全够用。**默认装 CUDA 版 = 拉 5 GB 垃圾进镜像。**
+
+**面试时能讲**：
+> "我把 torch 从默认的 CUDA 版换成 CPU 版，下载量从 5 GB 砍到 600 MB，镜像从 3.5 GB 瘦到 2.4 GB。因为我们项目只用 bge-small 做 embedding，24 MB 的小模型在 CPU 上毫秒级，根本不需要 GPU。改法是在 requirements.txt 顶部加一行 `--extra-index-url https://download.pytorch.org/whl/cpu`。"
+
+---
+
+## 故事 25：Windows wheel 不能给 Linux 容器用（2026-10-08）
+
+### 问题
+为了避开容器内 pip 下载超时，我想先在 Windows 宿主机下载所有 wheel 到 `wheelhouse/`，再让容器离线安装。
+
+宿主机跑：
+```cmd
+pip download -r requirements.txt -d wheelhouse -i https://mirrors.aliyun.com/pypi/simple/
+```
+
+下完了，`dir wheelhouse` 显示 100+ 个 whl。看文件名：
+```
+torch-2.14.1+cpu-cp314-cp314-win_amd64.whl
+faiss_cpu-1.15.1-cp314-cp314-win_amd64.whl
+pywin32-312-cp314-cp314-win_amd64.whl
+...
+```
+
+### 分析
+**三个维度都不匹配**：
+
+| 维度 | Windows 宿主机 | Linux 容器 |
+|---|---|---|
+| 操作系统 | `win_amd64` | `manylinux*` |
+| Python 版本 | `cp314`（本机 3.14） | `cp312`（容器 3.12） |
+| ABI | Windows ABI | Linux ABI |
+
+wheel 文件名后缀解读：
+```
+torch-2.14.1+cpu-cp314-cp314-win_amd64.whl
+                ^^^^^  ^^^^^  ^^^^^^^^
+                CPython 3.14  Windows amd64
+```
+
+**Docker 容器里**：
+- 平台是 Linux（`manylinux`）
+- Python 3.12（`cp312`）
+- **一个都装不上**
+
+### 方案
+**放弃 wheelhouse 方案，回到容器内直接下载**（配合故事 23 的阿里云源 + 故事 24 的 CPU 版 torch，下载量降到 600 MB，能过）。
+
+**如果非要本地下 wheel 给容器用**，必须用 `--platform` 明确指定：
+```cmd
+pip download -r requirements.txt -d wheelhouse ^
+    --platform manylinux2014_x86_64 ^
+    --platform manylinux_2_17_x86_64 ^
+    --platform manylinux_2_28_x86_64 ^
+    --platform any ^
+    --python-version 3.12 ^
+    --only-binary=:all: ^
+    --timeout 300 --retries 10
+```
+
+### 为什么容易踩
+- 开发时"下个 wheel 而已"看起来很简单
+- 但 pip 默认下载**当前平台**的 wheel
+- 宿主机是 Windows/Python 3.14，容器是 Linux/Python 3.12
+- **两个环境的 wheel 不通用**
+
+### 收获
+**别在宿主机给容器下 wheel**——这是**跨平台工具链陷阱**。除非明确用 `--platform` + `--python-version` 指定目标平台，否则宿主机下下来的都是"自己用得上、容器用不了"的 whl。
+
+**面试时能讲**：
+> "为了避开容器内 pip 超时，我试过在 Windows 宿主机下载 wheel 让容器离线安装。结果发现宿主机 Python 3.14 下载的是 `win_amd64` + `cp314` 的 wheel，而容器是 Linux + Python 3.12，需要 `manylinux` + `cp312`，一个都装不上。后来我明白了：wheel 是平台相关的，跨平台必须用 `--platform` 明确指定。"
+
+---
+
+## 故事 26：MCP Server 硬编码 HF 缓存路径（2026-10-08）
+
+### 问题
+Docker 容器启动后，`/chat` 请求立刻报错：
+
+```text
+FileNotFoundError: [Errno 2] No such file or directory: 
+'/root/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots'
+```
+
+MCP Server 启动失败 → 子进程崩溃 → `Connection closed` → FastAPI startup failed。
+
+### 分析
+看 `mcp_rag_server.py` 第 24 行：
+
+```python
+model_path = str(next(
+    (Path.home() / ".cache" / "huggingface" / "hub" / "models--BAAI--bge-small-zh-v1.5" / "snapshots")
+    .iterdir()
+))
+```
+
+**代码硬编码了 HF 缓存路径**，直接去 `snapshots/` 目录里找模型文件。这要求：
+1. 该目录必须存在
+2. 里面必须有 hash 命名的子目录
+3. 子目录里有 `config.json`、`model.safetensors` 等文件
+
+**为什么容器里没有这个目录？**
+- Dockerfile 里我删了构建期下载模型那行 `RUN python -c "...SentenceTransformer..."`（避网络超时）
+- 改成运行时 volume 挂载：`./hf_cache:/root/.cache/huggingface`
+- **但宿主机 `hf_cache/` 是空的** —— 从没跑过下载命令
+
+### 方案
+**宿主机先把模型下到 `hf_cache/`**：
+
+```cmd
+cd /d D:\Projects\Agent
+set HF_HOME=D:\Projects\Agent\hf_cache
+set HF_ENDPOINT=https://hf-mirror.com
+python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-small-zh-v1.5')"
+```
+
+下载 192 MB（包含 13 个文件）。**因为 volume 挂载，容器内 `/root/.cache/huggingface/` 就能看到这些文件。**
+
+重启容器：
+```cmd
+docker compose restart agent-api
+docker logs agent-api --tail 30
+```
+
+**成功日志**：
+```
+[RAG Server] BM25 索引构建完成，102 个 chunk
+FastMCP 3.4.8 — Server: RAG Knowledge Server
+INFO: Application startup complete.
+```
+
+### 更好的做法（待做）
+**改代码让 SentenceTransformer 自动下载**，不硬编码路径：
+
+```python
+# 改成：
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+# SentenceTransformer 会自动从 HF 缓存加载，缓存不存在则下载
+
+# 或者（如果想显式控制路径）：
+from huggingface_hub import snapshot_download
+model_path = snapshot_download("BAAI/bge-small-zh-v1.5")
+model = SentenceTransformer(model_path)
+```
+
+**这样无论宿主机有没有预下载模型，容器首次启动时都能自动拉取。**
+
+### 收获
+**不要在代码里硬编码缓存路径。** 让库自己处理缓存逻辑（HF 的 `snapshot_download` 或 `SentenceTransformer` 都会自动管理）。硬编码路径的问题：
+- 换环境就失效
+- 依赖精确的目录结构
+- 出错了不容易发现
+
+**另一个教训**：**Dockerfile 里删了某行 RUN，要检查这行原本"副作用"（下载模型）有没有别的补偿机制。** 我删了 `RUN python -c "...下载模型..."`，改成 volume 挂载，但**忘了让用户先下载**。这是"改动引入新假设"的典型例子。
+
+**面试时能讲**：
+> "我 Docker 化时把模型下载从构建期移到了运行时 volume 挂载，避开了网络超时。但改完启动容器直接崩，报 `FileNotFoundError: snapshots 目录不存在`。根因是 MCP Server 里硬编码了 HF 缓存路径，而宿主机 `hf_cache/` 是空的。解决方案是宿主机先跑 `snapshot_download` 把模型下到挂载目录，容器里就能读到了。后来我意识到更好的做法是改代码用 `SentenceTransformer('BAAI/bge-small-zh-v1.5')` 让它自动下载，不要硬编码路径。"
+
+---
+
 ## 总结
 
 这些坑覆盖了 Agent 开发中常见的几类问题：
@@ -1075,7 +1457,7 @@ rank-bm25>=0.2.2
 | 网络问题 | 第三方库默认行为要显式关闭 |
 | 异步编程 | 异步框架下初始化放 lifespan，工具链全程异步 |
 | 用户体验 | 流式输出要区分内部过程和用户可见内容 |
-| 构建优化 | Dockerfile 指令顺序影响缓存效率 |
+| 构建优化 | Dockerfile 指令顺序影响缓存效率；多阶段构建瘦身 |
 | 协议理解 | stdio 通信要用 stderr 打日志 |
 | 检索算法 | 混合检索要调权重，MMR 是 chunk 级多样性 |
 | 生产级意识 | Agent 要有护栏，记忆要持久化 |
@@ -1087,5 +1469,9 @@ rank-bm25>=0.2.2
 | 安全防护 | 服务端日志记详细，客户端响应给友好提示 |
 | 缓存正确性 | 缓存不是免费午餐，命中率结构性为 0 就删掉 |
 | 依赖管理 | requirements.txt 必须经过干净环境验证 |
+| **磁盘与 Docker 环境** | **Docker 构建失败先查磁盘空间；WSL2 vhdx 默认在 C 盘要迁走** |
+| **依赖下载与平台兼容** | **CPU 版 torch 能砍 90% 下载量；容器内下载比宿主机稳** |
+| **跨平台 wheel 陷阱** | **wheel 是平台相关的，宿主机给容器下 wheel 必须指定 `--platform`** |
+| **模型缓存与容器** | **别硬编码 HF 缓存路径；volume 挂载需要宿主机先备好数据** |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**

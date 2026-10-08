@@ -15,11 +15,13 @@ venv/
 # 日志
 *.log
 
-
 # LangGraph 持久化 checkpointer
 checkpoints.db*
 *.sqlite
 *.sqlite3
+
+# Checkpointer 挂载目录（挂载到宿主机，不进 Git）
+data/
 
 # HuggingFace 模型缓存（192MB+，可重新下载）
 hf_cache/

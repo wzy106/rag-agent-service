@@ -2,6 +2,7 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
+> 最后更新：2026-10-08（Docker 部署问题闭环）
 
 ## 一、项目简介（30 秒版本）
 
@@ -65,13 +66,13 @@ FastAPI（api_agent.py）
 |---|---|
 | Agent 编排 | LangChain 1.4 + LangGraph 1.2 |
 | 模型 | DeepSeek（OpenAI 兼容协议） |
-| 工具协议 | MCP（FastMCP 3.4.7） |
+| 工具协议 | MCP（FastMCP 3.4.8） |
 | 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF |
 | 降级 | 向量距离阈值（避免幻觉） |
 | 记忆持久化 | AsyncSqliteSaver（生产可换 PostgresSaver） |
 | 展示层 | MySQL（对话历史，只读） |
 | 服务 | FastAPI + Uvicorn |
-| 部署 | Docker + Docker Compose |
+| 部署 | Docker + Docker Compose（多阶段构建，2.42 GB） |
 | 流式 | SSE（Server-Sent Events） |
 
 ## 四、核心功能
@@ -89,6 +90,9 @@ FastAPI（api_agent.py）
 - FAISS 索引持久化（避免重复 embedding）
 - MySQL 持久化对话历史（展示层）
 - RAG 评估（召回率 + 精确率 + MRR + 多样性）
+- **Docker 多阶段构建**（镜像从 3.51 GB 降到 2.42 GB）
+- **CPU 版 torch**（下载量从 5 GB 降到 600 MB）
+- **模型缓存 volume 挂载**（`hf_cache/` 挂宿主机，重建不重下）
 
 ## 五、RAG 完整链路（面试重点）
 
@@ -139,6 +143,8 @@ class LocalEmbeddings(Embeddings):
 
 ### 4. 向量库 + 持久化
 
+> **变更（2026-10-08）**：`faiss_index/` 已从 `.gitignore` 移除，索引文件（index.faiss 204KB + index.pkl 44KB）已提交进 Git。别人 clone 后可直接构建，无需先跑建索引脚本。
+
 ```python
 INDEX_DIR = Path(__file__).resolve().parent.parent / "faiss_index"
 
@@ -151,7 +157,7 @@ else:
 
 - 首次启动：构建索引并保存到磁盘（`index.faiss` + `index.pkl`）
 - 后续启动：直接从磁盘加载，避免重复 embedding
-- 索引文件加进 `.gitignore`
+- 索引文件提交进 Git（248 KB，很小）
 
 ### 5. 检索策略
 
@@ -297,7 +303,7 @@ def search_knowledge(query: str) -> str:
 |---|---|---|
 | DeepSeek 不支持 json_schema | 模型 API 限制 | 改用 PydanticOutputParser，本地解析 |
 | 中文引号混入字符串 | 复制时带入全角引号 | 统一用英文半角引号 |
-| fastmcp 4.x 与 langchain-mcp-adapters 冲突 | mcp 版本要求矛盾（<2.0 vs >=2.0） | 降级 fastmcp 到 3.4.7 |
+| fastmcp 4.x 与 langchain-mcp-adapters 冲突 | mcp 版本要求矛盾（<2.0 vs >=2.0） | 降级 fastmcp 到 3.4.8 |
 | HuggingFace 联网卡住 | 国内无法访问 huggingface.co | 设 HF_HUB_OFFLINE=1，用本地缓存路径 |
 | uvicorn --reload 下调 asyncio.run 报错 | 事件循环嵌套 | 改用 FastAPI lifespan 异步钩子 |
 | MCP 工具同步调用报错 | MCP 工具是异步的 | Agent 改用 astream / ainvoke |
@@ -314,6 +320,12 @@ def search_knowledge(query: str) -> str:
 | **friendly_error 子串误判** | `"rate" in msg` 会匹配 generate / operate | 改用异常类型 + HTTP 状态码判断 |
 | **finally 里 yield 报错** | 客户端断连时 `aclose()` 抛 GeneratorExit | `[DONE]` 移出 finally，加 `except asyncio.CancelledError` |
 | **requirements.txt 缺依赖** | 逐个 pip install，忘了同步回清单 | 干净 venv 里 `pip install -r requirements.txt` 验证 |
+| **Docker 构建 `unpigz corrupted`** | C 盘 0 字节，镜像层解压时写入失败 | 清理 C 盘 → Docker 数据迁到 D 盘 |
+| **Docker 数据占满 C 盘 57 GB** | WSL2 vhdx 默认存在 C 盘 | Settings → Resources → Disk image location 改到 `D:\Docker` |
+| **pip 清华源 ReadTimeout** | 容器内下载 CUDA 全家桶（triton 248MB、cudnn 500MB、nccl 200MB） | 换阿里云源 + 长超时 + 重试；再用 CPU 版 torch 砍掉 CUDA 全家桶 |
+| **Windows wheel 不能给 Linux 容器用** | 宿主机是 `win_amd64` + `cp314`，容器是 `manylinux` + `cp312` | wheelhouse 作废，改用容器内直接下载 CPU 版 |
+| **MCP Server 硬编码 HF 缓存路径** | 代码写死 `Path.home()/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots` | 宿主机先 `snapshot_download` 到 `hf_cache/`，volume 挂载进容器 |
+| **Docker 容器内本地模型缺失** | Dockerfile 删了构建期下载模型的 RUN 行，但没有 volume 挂载 | docker-compose 加 `./hf_cache:/root/.cache/huggingface` |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -364,6 +376,13 @@ def search_knowledge(query: str) -> str:
 - 隔离：不污染宿主机环境
 - 部署简单：一条 `docker compose up -d`
 - 可复现：镜像=代码+环境+依赖
+
+**追问：你的 Docker 镜像多大？怎么优化的？**
+
+> "从 3.51 GB 优化到 2.42 GB。三个关键点：
+> ① **多阶段构建**：builder 阶段装 build-essential（编译器 300MB+），运行时不带，只 `COPY --from=builder /install /usr/local`；
+> ② **CPU 版 torch**：原来默认装 CUDA 版，会拉 triton 248MB + cudnn 500MB + nccl 200MB + nvshmem 100MB，换成 `--extra-index-url https://download.pytorch.org/whl/cpu` 后，bge-small 这种小模型在 CPU 上毫秒级，根本用不上 GPU；
+> ③ **模型下载移出构建期**：原来 Dockerfile 里有一行 `RUN python -c "...下载 embedding 模型..."`，构建耗时 33 分钟且容易网络超时。改成运行时 volume 挂载 `hf_cache`，构建期不下载。"
 
 ### 7. 并发量高怎么优化？
 
@@ -561,6 +580,83 @@ def friendly_error(e: Exception) -> str:
 - 文档库扩充到几百个文件，让不同检索策略的差异更明显
 - 加 chunk 级评估（不只是文档级）
 
+### 17. Docker 构建失败怎么排查？（新增）
+
+**案发现场**：
+```
+#16 exporting to image
+#16 ERROR: failed to extract layer sha256:f7df...: 
+    exit status 1: unpigz: skipping: <stdin>: corrupted -- incomplete deflate data
+failed to solve: Unavailable: error reading from server: EOF
+```
+
+**排查思路**：
+1. **看错误阶段**：报在 `exporting to image` / `unpacking` → 是写盘阶段，不是编译阶段
+2. **查磁盘空间**：`Get-PSDrive C` → 显示 Free = 0.00 GB ✅ 命中
+3. **查 Docker 数据位置**：`wsl -d docker-desktop df -h` → `/mnt/host/c` 100% 满
+
+**根因**：C 盘 200 GB 用满，Docker 解压镜像层时写不进去，管道被截断。
+
+**解法**：
+1. 清 C 盘（cleanmgr + 手动删 Temp/SoftwareDistribution/HF cache）
+2. Docker 数据迁到 D 盘（Settings → Disk image location）
+3. C 盘从 10 GB → 65 GB 可用
+
+**面试话术**：
+> "Docker 构建报 `unpigz corrupted` 这种错误，第一反应要查磁盘空间，不是改代码。我当时 C 盘 0 字节，Docker 在 unpacking 阶段写不进去才报的这个错。后来把 Docker 数据从 C 盘迁到 D 盘，问题解决。"
+
+### 18. 为什么 pip 突然开始超时？（新增）
+
+**触发点**：我改 Dockerfile 时，pip 命令加了 `--prefix=/install`，Docker 层缓存失效，必须重新下载所有依赖。
+
+**原来为什么"不超时"**：之前的构建命中旧缓存层，pip 实际没走网络。
+
+**超时原因**：torch 默认拉 CUDA 全家桶，光 triton 就 248 MB，加上 cudnn (500 MB) + nccl (200 MB) + nvshmem (100 MB)，总量 3~5 GB。清华源大包容易超时。
+
+**解法**：
+- 换阿里云源（比清华稳定）
+- 加 `--timeout 300 --retries 10`
+- **根本解法**：requirements.txt 加 `--extra-index-url https://download.pytorch.org/whl/cpu`，用 CPU 版 torch，下载量从 5 GB → 600 MB
+
+**面试话术**：
+> "pip 超时有时候不是网络问题，是缓存失效。我改了 pip 命令的一个参数，导致 Docker 层缓存失效，本来命中的缓存都要重新下载 5 GB 的 CUDA 全家桶。后来用 CPU 版 torch 把下载量砍到 600 MB。"
+
+### 19. Windows 下载的 wheel 能给 Linux 容器用吗？（新增）
+
+**不能。** 三个维度都必须匹配：
+
+| 维度 | Windows 宿主机 | Linux 容器 |
+|---|---|---|
+| 操作系统 | `win_amd64` | `manylinux*` |
+| Python 版本 | `cp314`（本机 3.14） | `cp312`（容器 3.12） |
+| ABI | Windows ABI | Linux ABI |
+
+**验证方法**：看 wheel 文件名后缀。
+- `torch-2.14.1+cpu-cp314-cp314-win_amd64.whl` ❌ 容器用不了
+- `torch-2.x.x+cpu-cp312-cp312-manylinux_2_28_x86_64.whl` ✅ 容器能用
+
+**教训**：**别在宿主机给容器下 wheel**，除非用 `pip download --platform manylinux2014_x86_64 --python-version 3.12 --only-binary=:all:` 明确指定平台。
+
+### 20. 多阶段构建的好处是什么？（新增）
+
+```dockerfile
+# Stage 1: builder
+FROM python:3.12-slim AS builder
+RUN apt-get install build-essential   # 编译器，300MB+
+RUN pip install --prefix=/install -r requirements.txt
+
+# Stage 2: runtime
+FROM python:3.12-slim
+COPY --from=builder /install /usr/local   # 只拷依赖，不拷编译器
+```
+
+**好处**：
+- 运行时镜像**不含 build-essential**（编译器 + 头文件 ~300 MB）
+- 减少攻击面（没有 gcc/g++ 可被利用）
+- 镜像更小（3.51 GB → 2.42 GB）
+
+**代价**：构建时间稍长（多一次 stage），但镜像拉取/推送更快。
+
 ## 八、项目数据（面试时能报的具体数字）
 
 - 工具数量：1 个（search_knowledge）
@@ -575,9 +671,13 @@ def friendly_error(e: Exception) -> str:
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
 - 展示层：MySQL（表 conversations）
 - 评估指标：召回率 / 精确率 / MRR / 多样性（30 个测试项）
-- 首次 Docker 构建耗时：约 19 分钟
+- 首次 Docker 构建耗时：约 19 分钟（CUDA）→ **5~10 分钟**（CPU）
 - 单次请求耗时：2~3 秒
-- 镜像大小：10.4 GB（实际磁盘占用 3.46 GB）
+- 镜像大小：10.4 GB → **2.42 GB**（content 519 MB）
+- Docker 数据位置：`D:\Docker`（55.73 GB）
+- C 盘可用空间：10.20 GB → **65.25 GB**
+- pip 下载量：3~5 GB（CUDA）→ **~600 MB**（CPU）
+- FAISS 索引：已提交 Git（248 KB）
 
 ## 九、可演示的操作
 
@@ -589,7 +689,7 @@ def friendly_error(e: Exception) -> str:
 6. 演示会话隔离：换 thread_id 问"它是什么"
 7. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
 8. 用浏览器打开 client.html，看打字机效果
-9. 展示 Docker 一键启动：docker compose up -d
+9. 展示 Docker 一键启动：`docker compose up -d`
 10. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
@@ -1071,7 +1171,7 @@ def evaluate_full(search_fn, name, k=3):
 | `MAX_DISTANCE = 1.1` | 阈值校准不够系统，是拍脑袋定的 | 对正负样本统计距离分布，取分离点 |
 | 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` 做来源判断 + 显式状态机 |
 | MCP Server 用了私有 API | `vectorstore.docstore._dict` 是内部 API，版本升级可能坏 | 构建索引时自己维护 chunks 列表并 pickle 落盘 |
-| Docker 部署 | Dockerfile 缺 COPY docs/，compose 缺 network，host 写死 localhost | 待修 |
+| ~~Docker 部署~~ | ~~Dockerfile 缺 COPY docs/，compose 缺 network，host 写死 localhost~~ | ✅ 2026-10-08 已修复 |
 
 ### 改进方案
 
@@ -1082,17 +1182,165 @@ def evaluate_full(search_fn, name, k=3):
 | 多指标评估 | 召回率 + 精确率 + MRR + 多样性 | ✅ 已做 |
 | 友好错误提示 | friendly_error 映射（异常类型） | ✅ 已做 |
 | 删掉无效缓存 | 命中率结构性为 0 | ✅ 已做 |
+| Docker 多阶段构建 | 3.51 GB → 2.42 GB | ✅ 已做 |
+| CPU 版 torch | 下载量 5 GB → 600 MB | ✅ 已做 |
+| 模型缓存 volume 挂载 | 重建不重下 | ✅ 已做 |
 | Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ⏳ 待做 |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
 | 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
 | 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
-| 修 Docker 部署 | COPY docs/ + network + 服务名 host | ⏳ 待做 |
+| MCP Server 自动下载模型 | 改硬编码路径为 SentenceTransformer 自动加载 | ⏳ 待做 |
 
 ### 面试答题模板
 
 > "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标：召回率、精确率、MRR、多样性。实测发现精确率和多样性呈 trade-off：纯相似度精确率 0.87、多样性 1.37；MMR+去重多样性 1.57、精确率 0.77。MRR 三种策略都在 0.96 以上，Top-1 都很准。我还算过随机基线——从 102 个 chunk 里随便抽 3 个，召回率 84.1%。这说明我的测试集判别力不够，下一步要扩到 200 条 + chunk 级标注。"
 
-## 十四、项目新增数据
+## 十四、Docker 部署完整方案（新增，面试重点）
+
+### 14.1 最终 Dockerfile
+
+```dockerfile
+# ---------- Stage 1: 构建依赖 ----------
+FROM python:3.12-slim AS builder
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+
+# 阿里云源 + PyTorch CPU 源
+RUN pip install --no-cache-dir --prefix=/install \
+        -r requirements.txt \
+        -i https://mirrors.aliyun.com/pypi/simple/ \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        --trusted-host mirrors.aliyun.com \
+        --trusted-host download.pytorch.org \
+        --timeout 300 \
+        --retries 10
+
+# ---------- Stage 2: 运行时 ----------
+FROM python:3.12-slim
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+
+ENV HF_HOME=/root/.cache/huggingface
+ENV HF_ENDPOINT=https://hf-mirror.com
+
+COPY docs/ ./docs/
+COPY faiss_index/ ./faiss_index/
+COPY mcp_test/mcp_rag_server.py ./mcp_test/mcp_rag_server.py
+COPY rag_api/api_agent.py ./rag_api/api_agent.py
+
+EXPOSE 8000
+CMD ["uvicorn", "rag_api.api_agent:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### 14.2 最终 docker-compose.yml
+
+```yaml
+services:
+  mysql:
+    image: mysql:8
+    container_name: agent-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: agent
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - agent-net
+
+  agent-api:
+    build: .
+    container_name: agent-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MYSQL_HOST=mysql           # 容器内必须用服务名，不能用 localhost
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_DATABASE=agent
+      - HF_ENDPOINT=https://hf-mirror.com
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface   # 模型缓存挂载，避免每次重建都下载
+    depends_on:
+      - mysql
+    networks:
+      - agent-net
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+
+networks:
+  agent-net:
+    driver: bridge
+```
+
+### 14.3 requirements.txt 关键两行
+
+```
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+```
+
+**原理**：PyTorch 官方 CPU 源里 torch 版本是 `2.9.0+cpu`，按 PEP 440 规则 `2.9.0+cpu > 2.9.0`，pip 自动选 CPU 版。
+
+### 14.4 部署踩坑时间线（2026-10-08）
+
+| 时间 | 问题 | 动作 |
+|---|---|---|
+| 19:00 | `unpigz corrupted`，构建失败 | 查 C 盘 → 0 字节 |
+| 19:10 | 清理 C 盘（Temp + SoftwareDistribution + HF cache） | Free 10 GB |
+| 19:20 | 项目搬到 D:\Projects\Agent | Move-Item 被锁 → robocopy 绕过 |
+| 19:30 | Docker 数据迁移 | Settings → `D:\Docker` → C 盘 65 GB |
+| 19:50 | 重建 Dockerfile（多阶段 + 阿里云源 + CPU torch） | 构建成功，2.42 GB |
+| 20:00 | 启动容器 | `docker compose up -d` ✅ |
+| 20:10 | 首次 `/chat` 报 `FileNotFoundError: snapshots` | MCP Server 找不到模型缓存 |
+| 20:20 | 宿主机 `snapshot_download` 到 `hf_cache/` | 192 MB 下完 |
+| 20:30 | 重启容器 | `Application startup complete.` ✅ |
+| 20:35 | 端到端测试（chat / stream / 多轮记忆） | 全过 ✅ |
+| 20:40 | Git 提交 + 推送 | 3 个 commit |
+
+### 14.5 面试话术（Docker 部署）
+
+> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要 bge-small-zh-v1.5 模型，我把它下到宿主机 `hf_cache/` 然后 volume 挂载进容器，避免每次重建都重新下模型。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
+
+## 十五、项目新增数据（更新）
+
+### Docker 部署相关（2026-10-08）
+
+- Docker 数据位置：`D:\Docker`（55.73 GB）
+- C 盘可用空间：10.20 GB → **65.25 GB**
+- 镜像大小：3.51 GB → **2.42 GB**（content 519 MB）
+- 构建耗时：33 分钟（CUDA）→ **5~10 分钟**（CPU）
+- pip 下载量：3~5 GB → **~600 MB**
+- 镜像平台：Linux/amd64（`manylinux` wheel，Python 3.12 `cp312`）
+- 宿主机平台：Windows/amd64（`win_amd64` wheel，Python 3.14 `cp314`）
+  - **注意**：两者不通用，宿主机下 wheel 给容器用是错的
+
+### Git 仓库状态（2026-10-08）
+
+- 新增 commit：
+  - `b5afdde` build: 多阶段构建 + CPU 版 torch + hf_cache 挂载
+  - `32d1eb8` chore: 忽略 hf_cache、wheelhouse、IDE 配置等构建产物
+  - `0ad3490` chore: 提交 FAISS 索引（248KB），clone 后可直接构建
+- `.gitignore` 关键规则：
+  - `hf_cache/`（模型缓存，192 MB+）
+  - `wheelhouse/`（Docker wheel 缓存）
+  - `checkpoints.db*` `*.sqlite` `*.sqlite3`（运行时数据库）
+  - `faiss_index/` **已移除**（索引只有 248 KB，提交进仓库让 clone 后可直接构建）
+- GitHub：https://github.com/wzy106/rag-agent-service
+
+## 十六、项目数据汇总（最新）
 
 - MySQL 表名：`conversations`（展示层）
 - MySQL 字段：id, thread_id, role, content, created_at
@@ -1111,5 +1359,9 @@ def evaluate_full(search_fn, name, k=3):
 - 缓存：暂时没有（已删 Redis，命中率结构性为 0）
 - Redis：依赖保留，预留做限流
 - 错误处理：`friendly_error` 用异常类型映射，不泄漏内部信息
-- requirements.txt：18 个包，已在干净 venv 里验证可导入
+- requirements.txt：18 个包 + 顶部 2 行（CPU 索引），已在干净 venv 里验证可导入
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
+
+---
+
+**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通**，可进入评估优化或面试冲刺阶段。
