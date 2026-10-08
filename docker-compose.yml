@@ -29,9 +29,14 @@ services:
       - MYSQL_DATABASE=agent
       - HF_ENDPOINT=https://hf-mirror.com
       - HF_HOME=/root/.cache/huggingface
+      - HF_HUB_OFFLINE=1                # ← 新增
+      - TRANSFORMERS_OFFLINE=1          # ← 新增
+      - DATA_DIR=/app/rag_api/data
     volumes:
       # 模型缓存挂载到宿主机，避免每次重建都重新下载
       - ./hf_cache:/root/.cache/huggingface
+      # LangGraph checkpointer 持久化，避免容器重建时记忆丢失
+      - ./data:/app/rag_api/data
     depends_on:
       - mysql
     networks:

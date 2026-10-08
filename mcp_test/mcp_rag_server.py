@@ -1,10 +1,23 @@
 import os
 import sys
+from pathlib import Path
+
+# ===== HF 环境初始化（必须在 sentence_transformers 之前）=====
+# 优先级：显式环境变量 > 容器默认挂载点 > 项目内 hf_cache/
+def _resolve_hf_home() -> str:
+    if os.environ.get("HF_HOME"):
+        return os.environ["HF_HOME"]
+    container_default = Path("/root/.cache/huggingface")
+    if container_default.exists():
+        return str(container_default)
+    return str(Path(__file__).resolve().parent.parent / "hf_cache")
+
+_HF_HOME = _resolve_hf_home()
+os.environ["HF_HOME"] = _HF_HOME
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import jieba
-from pathlib import Path
 from rank_bm25 import BM25Okapi
 from fastmcp import FastMCP
 from langchain_core.documents import Document
@@ -13,16 +26,22 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from sentence_transformers import SentenceTransformer
 
+print(f"[RAG Server] HF_HOME={_HF_HOME}", file=sys.stderr)
+
+
 class LocalEmbeddings(Embeddings):
-    def __init__(self, model_path):
-        self.model = SentenceTransformer(model_path)
+    def __init__(self, model_name):
+        # 让 HF 自己根据 HF_HOME 解析缓存路径，不再手工拼 snapshots
+        self.model = SentenceTransformer(model_name)
+
     def embed_documents(self, texts):
         return self.model.encode(texts).tolist()
+
     def embed_query(self, text):
         return self.model.encode(text).tolist()
 
-model_path = str(next((Path.home() / ".cache" / "huggingface" / "hub" / "models--BAAI--bge-small-zh-v1.5" / "snapshots").iterdir()))
-embedding = LocalEmbeddings(model_path)
+
+embedding = LocalEmbeddings("BAAI/bge-small-zh-v1.5")
 
 INDEX_DIR = Path(__file__).resolve().parent.parent / "faiss_index"
 
@@ -102,8 +121,10 @@ def hybrid_search(query, k=3, rrf_k=60, vector_weight=0.7, bm25_weight=0.3, max_
     content_to_doc = {doc.page_content: doc for doc in all_docs}
     return [content_to_doc[c] for c in top_contents]
 
+
 # ===== MCP Server =====
 mcp = FastMCP("RAG Knowledge Server")
+
 
 @mcp.tool
 def search_knowledge(query: str) -> str:
@@ -115,6 +136,7 @@ def search_knowledge(query: str) -> str:
         return "知识库中没有找到相关信息。"
 
     return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
+
 
 if __name__ == "__main__":
     mcp.run()

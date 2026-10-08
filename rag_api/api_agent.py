@@ -110,7 +110,11 @@ async def lifespan(app: FastAPI):
         max_tokens=MAX_TOKENS,
     )
 
-    checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
+    # checkpointer 持久化路径：优先用 DATA_DIR（容器里由 compose 设定），
+    # 否则用 rag_api/data/（本地开发），避免 DB 文件散落在源码目录
+    data_dir = Path(os.getenv("DATA_DIR", Path(__file__).resolve().parent / "data"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = str(data_dir / "checkpoints.db")
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
         agent = create_agent(
             model,
