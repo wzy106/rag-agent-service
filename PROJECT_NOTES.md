@@ -54,9 +54,9 @@ FastAPI（api_agent.py）
 - MySQL 只做展示层（给 /history 接口用）
 
 缓存层：
-- Redis 缓存高频问题
-- key 格式：chat:{thread_id}:v{context_version}:{md5}
-- context_version = 该会话的消息数，防止上下文不同命中同一缓存
+- 暂时没有缓存。历史版本用过 Redis，但命中率结构性为 0，已删除。
+- Redis 依赖保留在 requirements.txt 和 docker-compose.db.yml 中，
+  下一步计划用于限流（incr + expire）。
 ```
 
 ## 三、技术栈
@@ -68,7 +68,6 @@ FastAPI（api_agent.py）
 | 工具协议 | MCP（FastMCP 3.4.7） |
 | 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF |
 | 降级 | 向量距离阈值（避免幻觉） |
-| 缓存 | Redis |
 | 记忆持久化 | AsyncSqliteSaver（生产可换 PostgresSaver） |
 | 展示层 | MySQL（对话历史，只读） |
 | 服务 | FastAPI + Uvicorn |
@@ -85,10 +84,9 @@ FastAPI（api_agent.py）
 - SSE 流式输出（打字机效果）
 - 中间步骤过滤（只输出最终回答）
 - **Agent 护栏**（recursion_limit=10，max_tokens=2000）
-- **友好异常处理**（错误映射为可读提示，不泄漏内部信息）
+- **友好异常处理**（异常类型映射，不泄漏内部信息）
 - 请求日志（收到消息 + 耗时统计）
 - FAISS 索引持久化（避免重复 embedding）
-- **上下文感知缓存**（key 带 thread_id + context_version，防串台）
 - MySQL 持久化对话历史（展示层）
 - RAG 评估（召回率 + 精确率 + MRR + 多样性）
 
@@ -307,11 +305,15 @@ def search_knowledge(query: str) -> str:
 | Docker 构建慢 | 模型下载 + 依赖安装 | 分层缓存，模型下载放独立层 |
 | MCP Server 里的 print 看不到 | MCP 协议占用 stdout | 改成输出到 stderr |
 | 等权混合检索反而变差 | RRF 奖励两路都出现的文档，BM25 判断错会被放大 | 加权 RRF（向量 0.7 / BM25 0.3） |
-| 多轮对话缓存串台 | 同一问题在不同上下文答案不同 | 缓存 key 加 thread_id + context_version |
+| 多轮对话缓存串台 | 同一问题在不同上下文答案不同 | 缓存 key 加 thread_id |
+| 缓存命中率结构性为 0 | context_version 每轮 +2，同一问题第二次必然 miss | **删掉缓存**，承认是负优化 |
 | 无关问题触发幻觉 | 检索无相关内容时直接调 LLM | 距离阈值降级，返回"没找到"不调 LLM |
 | 单一评估指标误导 | 只看召回率无法区分策略 | 加精确率、MRR、多样性 |
 | 双源记忆打架 | InMemorySaver + MySQL 手动拼历史 | 统一到 LangGraph checkpointer（AsyncSqliteSaver） |
-| **错误信息泄漏** | `str(e)` 直接返回客户端，可能泄漏 API key / 路径 | 映射成 `friendly_error` 友好提示，原始异常只打日志 |
+| **错误信息泄漏** | `str(e)` 直接返回客户端，可能泄漏 API key / 路径 | 映射成 `friendly_error` 友好提示 |
+| **friendly_error 子串误判** | `"rate" in msg` 会匹配 generate / operate | 改用异常类型 + HTTP 状态码判断 |
+| **finally 里 yield 报错** | 客户端断连时 `aclose()` 抛 GeneratorExit | `[DONE]` 移出 finally，加 `except asyncio.CancelledError` |
+| **requirements.txt 缺依赖** | 逐个 pip install，忘了同步回清单 | 干净 venv 里 `pip install -r requirements.txt` 验证 |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -368,8 +370,7 @@ def search_knowledge(query: str) -> str:
 - Agent 改用异步（astream / ainvoke）
 - MCP Server 常驻，不用每次启动
 - 向量库换 FAISS / Chroma 持久化版本
-- 加 Redis 缓存高频问题
-- 加限流（SlowAPI）
+- 加 Redis 限流（incr + expire）
 - 多 worker 部署（uvicorn --workers N 或 gunicorn）
 - 反向代理（Nginx）分担负载
 
@@ -474,14 +475,6 @@ result = await agent.ainvoke(
 
 **只需要传当前这一轮的消息**，Agent 会自动从 checkpointer 加载历史。
 
-**缓存 key 也要带 thread_id + context_version**：
-
-```python
-key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
-```
-
-因为同一个问题在不同上下文里答案可能不同，不加版本号会导致上下文变了但命中同一缓存。
-
 **测试验证**：
 1. `test_001` 问"MMR 是什么？" → 正常回答
 2. **重启服务**
@@ -534,27 +527,29 @@ key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdige
 
 **问题**：直接返回 `str(e)` 可能泄漏 API key、文件路径、SQL 结构等内部信息。
 
-**方案**：用 `friendly_error` 映射成用户可读的提示。
+**方案**：用 `friendly_error` 映射成用户可读的提示。**用异常类型 + HTTP 状态码判断，不做自然语言子串匹配。**
 
 ```python
 def friendly_error(e: Exception) -> str:
-    msg = str(e).lower()
-    if "authentication" in msg or "401" in msg or "api key" in msg:
+    status = getattr(e, "status_code", None)
+    if status == 401:
         return "模型服务认证失败，请联系管理员"
-    if "timeout" in msg or "timed out" in msg:
-        return "请求超时，请稍后再试"
-    if "rate" in msg or "429" in msg:
+    if status == 429:
         return "请求过于频繁，请稍后再试"
-    if "connection" in msg or "connect" in msg:
-        return "服务暂时不可用，请稍后再试"
+    if isinstance(e, asyncio.TimeoutError):
+        return "请求超时，请稍后再试"
+    if isinstance(e, pymysql.MySQLError):
+        return "存储服务暂时不可用，请稍后再试"
     return "服务暂时不可用，请稍后再试"
 ```
+
+**为什么不用子串匹配**：`"rate" in msg` 会误匹配 `generate`、`operate`、`separate` 等词，导致错误分类。
 
 **服务端**：完整异常打日志，方便排查
 **客户端**：只看到友好提示，不泄漏内部信息
 
 **面试话术**：
-> "服务端用完整的 `str(e)` 打日志，客户端只返回 `friendly_error` 映射后的友好提示。因为 `str(e)` 可能包含 API key、文件路径、SQL 结构等内部信息，生产环境不能直接暴露给客户端。我按异常类型映射成不同的错误码：认证失败、超时、限流、其他。"
+> "服务端用完整的 `str(e)` 打日志，客户端只返回 `friendly_error` 映射后的友好提示。因为 `str(e)` 可能包含 API key、文件路径、SQL 结构等内部信息，生产环境不能直接暴露给客户端。我用异常类型 + HTTP 状态码判断，而不是子串匹配——因为 `rate` 会误匹配 `generate`。"
 
 ### 16. 如果让你重做，会改什么？
 
@@ -578,11 +573,10 @@ def friendly_error(e: Exception) -> str:
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
-- 缓存：Redis（TTL 3600 秒，key 带 thread_id + context_version）
 - 展示层：MySQL（表 conversations）
 - 评估指标：召回率 / 精确率 / MRR / 多样性（30 个测试项）
 - 首次 Docker 构建耗时：约 19 分钟
-- 单次请求耗时：未命中 2~3 秒，命中 <0.1 秒
+- 单次请求耗时：2~3 秒
 - 镜像大小：10.4 GB（实际磁盘占用 3.46 GB）
 
 ## 九、可演示的操作
@@ -658,65 +652,19 @@ def friendly_error(e: Exception) -> str:
 - 混合检索：两者加权合并，取长补短
 - RRF 是标准合并算法，公式 `Σ 权重/(k+排名)`
 
-## 十一、Redis 缓存 + MySQL 展示层（工程化）
+## 十一、MySQL 展示层 + Redis 预留（工程化）
 
-### 为什么需要这两个
+### 为什么还需要 MySQL
 
 | 问题 | 解法 |
 |---|---|
-| 同一个问题反复问，每次调大模型浪费 Token | Redis 缓存回答 |
-| 服务重启后对话历史丢失 | AsyncSqliteSaver 持久化 |
-| 需要展示对话历史 | MySQL 展示层 |
+| 用户要查看历史对话 | MySQL 展示层，给 /history 接口用 |
+| Agent 的记忆 | 交给 LangGraph checkpointer，不经过 MySQL |
 
-### Redis 缓存实现
-
-```python
-import redis, hashlib
-
-r = redis.Redis(host="localhost", port=6379, decode_responses=True)
-
-def get_context_version(thread_id: str) -> int:
-    """获取该会话的上下文版本号（= MySQL 里的消息数）"""
-    conn = pymysql.connect(...)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM conversations WHERE thread_id = %s",
-                (thread_id,)
-            )
-            count = cur.fetchone()[0]
-    finally:
-        conn.close()
-    return count
-
-def get_cached(thread_id: str, query: str, context_version: int):
-    key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
-    return r.get(key)
-
-def set_cache(thread_id: str, query: str, answer: str, context_version: int, ttl: int = 3600):
-    key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
-    r.set(key, answer, ex=ttl)
-```
-
-**缓存 key 四段结构**：
-
-| 段 | 作用 |
-|---|---|
-| `chat:` | 命名空间隔离 |
-| `thread_id` | 防止多轮对话串台 |
-| `v{context_version}` | 该会话当前的消息数，防止上下文不同命中同一缓存 |
-| `{md5}` | query 的 MD5，避免中文/特殊字符问题 |
-
-**为什么加 `context_version`**：
-- 多轮对话下，同一个问题在不同上下文里答案可能不同
-- 只按 query 做 key → 上下文变了但缓存命中 → 返回错误答案
-- 加上版本号后，上下文一变 key 就变，正确性优先
-
-**实测验证**：
-```text
-第一次： [缓存写入] MMR 是什么？ (v0)
-第二次： [缓存写入] MMR 是什么？ (v2)   ← 版本变了，缓存没命中
-```
+**角色划分**：
+- **checkpointer（SQLite）**：Agent 的记忆，唯一真相源
+- **MySQL**：只做展示层，给 `/history` 接口用
+- **Redis**：暂时不用，预留做限流
 
 ### MySQL 对话历史（展示层）
 
@@ -730,39 +678,62 @@ CREATE TABLE conversations (
 );
 ```
 
-**角色**：MySQL **不再是记忆源**，只是**展示层**——给 `/history` 接口用，让用户查看历史。Agent 的历史由 checkpointer 管。
+**数据流**：
+```text
+用户提问
+    ↓
+调 Agent（checkpointer 自动加载历史）
+    ↓
+写 MySQL 展示层（失败不影响主流程）
+```
 
-### 完整数据流
+**关键设计**：
+- MySQL 写入包 try/except，失败只打日志
+- `/history` 接口加 `limit` 上限保护（最大 100）
+
+### Redis 预留说明
+
+**当前没用**。历史版本用过 Redis 缓存，但实测发现：
+- 缓存 key 用 `context_version` 做版本号
+- `context_version` = MySQL 消息数，每轮 +2
+- 同一问题第二次必然 miss，**命中率结构性为 0**
+- 是负优化，已删除
+
+**下一步计划**：
+- 用于限流（`incr` + `expire`）
+- 或用于分布式缓存（多实例共享）
+
+**为什么保留依赖**：
+- `requirements.txt` 和 `docker-compose.db.yml` 里还留着
+- 将来加限流时不用重新配置
+
+### 完整数据流（当前版本）
 
 ```text
 用户提问（带 thread_id）
     ↓
-查 MySQL 拿 context_version
+调 Agent（checkpointer 自动加载历史）
     ↓
-Redis 查缓存（key 带 thread_id + version）
-    ├── 命中 → 返回缓存 + 写 MySQL 展示层
-    └── 未命中 → 调 Agent（checkpointer 自动加载历史）
-              → 写 Redis 缓存 + 写 MySQL 展示层 → 返回
+写 MySQL 展示层（失败不影响主流程）
+    ↓
+返回答案
 ```
 
 ### 面试答题要点
 
 | 问题 | 答案 |
 |---|---|
-| 高频问题怎么优化？ | Redis 缓存，key 带 thread_id + context_version，TTL 一小时 |
 | 对话历史怎么持久化？ | LangGraph checkpointer + AsyncSqliteSaver |
 | MySQL 用来做什么？ | 展示层，给 /history 接口用 |
-| 多实例部署怎么共享状态？ | Redis 共享缓存；checkpointer 换 PostgresSaver |
-| Redis 和 MySQL 区别？ | Redis 内存、快、适合缓存；MySQL 磁盘、持久、适合结构化数据 |
-| 限流怎么做？ | Redis `incr` + `expire`，每分钟超 N 次返回 429 |
-| 为什么缓存 key 用 MD5？ | 避免中文/特殊字符问题，固定长度省内存 |
-| 为什么缓存 key 还要加 thread_id + version？ | 多轮对话下同一问题上下文不同，防串台+防上下文错配 |
+| 为什么删掉 Redis 缓存？ | 命中率结构性为 0，是负优化 |
+| 为什么不删 Redis 依赖？ | 预留做限流（incr + expire） |
+| 多实例部署怎么共享状态？ | checkpointer 换 PostgresSaver；限流用 Redis |
 
 ### 可优化方向
 
-- 缓存加 prompt 版本号，prompt 改了自动失效
 - Redis 加密码和连接池，生产环境必须
-- 用连接池代替每次新建连接（性能优化）
+- 用连接池代替每次新建 MySQL 连接（性能优化）
+- MySQL 写入改异步（aiomysql）
 
 ## 十二、FastAPI 服务层设计（面试重点）
 
@@ -833,9 +804,9 @@ def ensure_table():
 **解法**：用 `saw_tool` 标志区分。
 
 ```python
-saw_tool = False    # 是否已过工具节点
-pending = []        # 工具调用前的内容（先缓存）
-started = False     # 是否已开始输出最终回答
+saw_tool = False
+pending = []
+started = False
 
 async for chunk in agent.astream(...):
     msg_chunk, metadata = chunk
@@ -874,50 +845,59 @@ yield f"data: {json.dumps({'text': msg_chunk.content}, ensure_ascii=False)}\n\n"
 
 **结束标记**：`yield "data: [DONE]\n\n"`
 
+**重要设计**：`[DONE]` **不能放在 `finally`**。客户端断连时会调 `aclose()`，在 `finally` 里 `yield` 会抛 `RuntimeError: async generator ignored GeneratorExit`。
+
+**正确做法**：
+```python
+try:
+    ...
+    yield "data: [DONE]\n\n"      # 成功路径
+except asyncio.CancelledError:
+    logger.info("客户端断连")       # 不要 yield
+    raise
+except Exception as e:
+    yield f"data: {json.dumps({'error': friendly_error(e)})}\n\n"
+    yield "data: [DONE]\n\n"      # 失败路径
+finally:
+    # 只做清理，不 yield
+    print(f"[请求] 耗时 ...")
+```
+
 ### 6. 异常处理（友好错误提示）
 
 ```python
 def friendly_error(e: Exception) -> str:
-    """把异常映射成用户可读的提示，不泄漏内部信息"""
-    msg = str(e).lower()
-    if "authentication" in msg or "401" in msg or "api key" in msg:
+    status = getattr(e, "status_code", None)
+    if status == 401:
         return "模型服务认证失败，请联系管理员"
-    if "timeout" in msg or "timed out" in msg:
-        return "请求超时，请稍后再试"
-    if "rate" in msg or "429" in msg:
+    if status == 429:
         return "请求过于频繁，请稍后再试"
-    if "connection" in msg or "connect" in msg:
-        return "服务暂时不可用，请稍后再试"
+    if isinstance(e, asyncio.TimeoutError):
+        return "请求超时，请稍后再试"
+    if isinstance(e, pymysql.MySQLError):
+        return "存储服务暂时不可用，请稍后再试"
     return "服务暂时不可用，请稍后再试"
 ```
 
-**在接口里的用法**：
+**为什么不子串匹配**：`"rate" in msg` 会误匹配 `generate`、`operate`。用异常类型 + HTTP 状态码更准确。
+
+**服务端**：完整异常打日志，方便排查
+**客户端**：只看到友好提示，不泄漏内部信息
+
+### 7. MySQL 连接参数用环境变量
 
 ```python
-try:
-    ...
-except Exception as e:
-    # 服务端记录完整异常
-    print(f"[错误] {type(e).__name__}: {str(e)}")
-    # 客户端只看到友好提示
-    raise HTTPException(status_code=500, detail=friendly_error(e))
+conn = pymysql.connect(
+    host=os.getenv("MYSQL_HOST", "localhost"),
+    port=int(os.getenv("MYSQL_PORT", "3306")),
+    user=os.getenv("MYSQL_USER", "root"),
+    password=os.getenv("MYSQL_PASSWORD", "root123"),
+    database=os.getenv("MYSQL_DATABASE", "agent"),
+    charset="utf8mb4"
+)
 ```
 
-**为什么要这样做**：`str(e)` 可能包含 API key、文件路径、SQL 结构等内部信息，直接返回给客户端是安全隐患。
-
-### 7. Redis 缓存 key 设计
-
-```python
-key = f"chat:{thread_id}:v{context_version}:{hashlib.md5(query.encode()).hexdigest()}"
-```
-
-**四段结构**：
-- `chat:`：命名空间隔离
-- `thread_id`：多轮对话下防止串台
-- `v{context_version}`：上下文版本号，防止上下文不同命中同一缓存
-- `{md5}`：query 的 MD5
-
-**为什么加 `context_version`**：多轮对话下同一问题在不同上下文答案不同，只按 query 做 key 会返回错误答案。
+**为什么**：本地开发用 `localhost`，Docker 容器里要用服务名 `mysql`。写死了容器里连不上。
 
 ### 8. Agent 护栏
 
@@ -946,7 +926,7 @@ checkpoint_path = str(Path(__file__).resolve().parent / "checkpoints.db")
 async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
     agent = create_agent(
         model, tools=tools,
-        checkpointer=saver,   # 持久化 saver
+        checkpointer=saver,
         system_prompt="..."
     )
 ```
@@ -959,11 +939,6 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 | MySQL | 记忆源 | 降级为展示层（给 /history 用） |
 | 消息格式 | OpenAI dict 手动拼 | 统一交给 LangGraph |
 
-**验证**：
-1. 第一轮问"MMR 是什么？"
-2. **重启服务**
-3. 第二轮问"它和普通相似度有什么区别？" → 仍能理解 ✅
-
 ### 10. 面试高频问题
 
 | 问题 | 答案要点 |
@@ -973,10 +948,10 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 | 为什么用 lifespan 不用顶层代码？ | 顶层会和 uvicorn 事件循环冲突 |
 | 流式接口怎么过滤中间步骤？ | `saw_tool` 标志分界，`pending` 缓存工具前内容 |
 | SSE 格式是什么？ | `data: 内容\n\n`，结束发 `[DONE]` |
+| 为什么 [DONE] 不能放 finally？ | 客户端断连时 aclose() 抛 GeneratorExit，finally 里 yield 会抛 RuntimeError |
 | Agent 死循环怎么防？ | `recursion_limit=10` + `max_tokens=2000` |
 | Agent 多轮对话怎么实现？ | LangGraph checkpointer + AsyncSqliteSaver |
-| 错误信息怎么处理？ | `friendly_error` 映射，原始异常只打日志 |
-| 缓存 key 怎么设计？ | `chat:{thread_id}:v{context_version}:{md5}` |
+| 错误信息怎么处理？ | `friendly_error` 映射，用异常类型判断 |
 | 检索不到内容怎么处理？ | 距离阈值降级，返回"没找到"，不调 LLM |
 | RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 |
 
@@ -1086,15 +1061,17 @@ def evaluate_full(search_fn, name, k=3):
 - **文档级召回而非 chunk 级**：用 `source`（文件名）判断命中，只有两三篇文档，命中太容易，含金量不高。生产环境应该标注 chunk id 或关键句。
 - **30 条样本太少**：3% 的差异（97% vs 93%）是一条样本的差别，统计上无意义。应该扩到 200 条以上。
 - **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness。
+- **随机基线**：当前随机检索的召回率是 84.1%，三种策略全 100%，**判别力不足**。
 
 **架构层面**：
 | 位置 | 问题 | 生产级解法 |
 |---|---|---|
-| `/chat` 和 `/chat/stream` | Redis 和 pymysql 是**同步客户端**，在 async 路径上会阻塞事件循环 | 用 `aioredis` + `aiomysql` |
+| `/chat` 和 `/chat/stream` | pymysql 是**同步客户端**，在 async 路径上会阻塞事件循环 | 用 `aiomysql` |
 | `save_conversation` | 每次请求新建连接，没有连接池 | 用连接池（如 `DBUtils`） |
 | `MAX_DISTANCE = 1.1` | 阈值校准不够系统，是拍脑袋定的 | 对正负样本统计距离分布，取分离点 |
 | 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` 做来源判断 + 显式状态机 |
 | MCP Server 用了私有 API | `vectorstore.docstore._dict` 是内部 API，版本升级可能坏 | 构建索引时自己维护 chunks 列表并 pickle 落盘 |
+| Docker 部署 | Dockerfile 缺 COPY docs/，compose 缺 network，host 写死 localhost | 待修 |
 
 ### 改进方案
 
@@ -1103,28 +1080,27 @@ def evaluate_full(search_fn, name, k=3):
 | 混合检索 | 向量 + BM25，加权合并 | ✅ 已做 |
 | 降级策略 | 距离阈值拦截无关问题 | ✅ 已做 |
 | 多指标评估 | 召回率 + 精确率 + MRR + 多样性 | ✅ 已做 |
-| 上下文感知缓存 | key 带 context_version | ✅ 已做 |
-| 友好错误提示 | friendly_error 映射 | ✅ 已做 |
+| 友好错误提示 | friendly_error 映射（异常类型） | ✅ 已做 |
+| 删掉无效缓存 | 命中率结构性为 0 | ✅ 已做 |
 | Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ⏳ 待做 |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
 | 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
 | 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
+| 修 Docker 部署 | COPY docs/ + network + 服务名 host | ⏳ 待做 |
 
 ### 面试答题模板
 
-> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标：召回率、精确率、MRR、多样性。实测发现精确率和多样性呈 trade-off：纯相似度精确率 0.87、多样性 1.37；MMR+去重多样性 1.57、精确率 0.77。MRR 三种策略都在 0.96 以上，Top-1 都很准。选策略看业务——追求精确用相似度，需要多角度用 MMR+去重。之前还发现等权 RRF 反而比纯向量差（97%），加权后（向量 0.7、BM25 0.3）恢复到 100%。"
+> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标：召回率、精确率、MRR、多样性。实测发现精确率和多样性呈 trade-off：纯相似度精确率 0.87、多样性 1.37；MMR+去重多样性 1.57、精确率 0.77。MRR 三种策略都在 0.96 以上，Top-1 都很准。我还算过随机基线——从 102 个 chunk 里随便抽 3 个，召回率 84.1%。这说明我的测试集判别力不够，下一步要扩到 200 条 + chunk 级标注。"
 
 ## 十四、项目新增数据
 
-- Redis key 格式：`chat:{thread_id}:v{context_version}:{md5}`
-- Redis TTL：3600 秒
 - MySQL 表名：`conversations`（展示层）
 - MySQL 字段：id, thread_id, role, content, created_at
-- 缓存命中 vs 未命中：未命中约 2~3 秒，命中不到 0.1 秒
 - 新增接口：`GET /history?thread_id=user_001&limit=20`
 - 评估集规模：30 个测试项
 - 当前知识库：2 个文档、102 个 chunk
 - 评估指标：召回率 / 精确率 / MRR / 多样性
+- 随机检索基线：84.1%
 - 相似度：召回率 100%，精确率 0.87，MRR 0.96，多样性 1.37
 - MMR：召回率 100%，精确率 0.83，MRR 0.97，多样性 1.43
 - MMR + 去重：召回率 100%，精确率 0.77，MRR 0.97，多样性 1.57
@@ -1132,6 +1108,8 @@ def evaluate_full(search_fn, name, k=3):
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
-- 缓存 key：带 thread_id + context_version，防串台和上下文错配
-- 错误处理：`friendly_error` 映射，不泄漏内部信息
+- 缓存：暂时没有（已删 Redis，命中率结构性为 0）
+- Redis：依赖保留，预留做限流
+- 错误处理：`friendly_error` 用异常类型映射，不泄漏内部信息
+- requirements.txt：18 个包，已在干净 venv 里验证可导入
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
