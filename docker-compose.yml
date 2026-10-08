@@ -1,6 +1,19 @@
-version: "3.9"
-
 services:
+  # MySQL 数据库（Agent 的对话历史展示层）
+  mysql:
+    image: mysql:8
+    container_name: agent-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: agent
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - agent-net
+
+  # Agent API 服务
   agent-api:
     build: .
     container_name: agent-api
@@ -9,5 +22,25 @@ services:
     env_file:
       - .env
     environment:
+      # 容器内 localhost 指容器自己，必须用服务名 mysql
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_DATABASE=agent
       - HF_ENDPOINT=https://hf-mirror.com
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      # 模型缓存挂载到宿主机，避免每次重建都重新下载
+      - ./hf_cache:/root/.cache/huggingface
+    depends_on:
+      - mysql
+    networks:
+      - agent-net
     restart: unless-stopped
+
+volumes:
+  mysql_data:
+
+networks:
+  agent-net:
+    driver: bridge
