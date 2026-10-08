@@ -23,6 +23,7 @@
 | 架构重构 | 故事 17 |
 | 安全防护 | 故事 18 |
 | 缓存正确性 | 故事 19 |
+| 依赖管理 | 故事 20 |
 
 ---
 
@@ -327,6 +328,9 @@ score += bm25_weight / (rrf_k + bm25_ranks[content])
 ### 收获
 混合检索不一定比纯向量好，关键是权重调优。任何"组合方案"都要评估它的边际收益，而不是盲目叠加。
 
+### 已知不足
+30 条样本上，97% 和 100% 差 1 条，可能只是噪声。需要扩充样本 + 加随机基线。
+
 ---
 
 ## 故事 10：MMR 是 chunk 级多样性
@@ -625,6 +629,7 @@ def evaluate_full(search_fn, name, k=3):
 - **文档级召回而非 chunk 级**：用 `source`（文件名）判断命中，只有两三篇文档，命中太容易，含金量不高。生产环境应该标注 chunk id 或关键句。
 - **30 条样本太少**：3% 的差异（97% vs 93%）是一条样本的差别，统计上无意义。应该扩到 200 条以上。
 - **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness。
+- **没有随机基线**：补测随机检索器，30 条上召回率 84.1%，说明当前指标判别力只有 15.9 个点。
 
 ---
 
@@ -758,12 +763,11 @@ except Exception as e:
 - 比如 `Connection refused to 10.0.1.5:3306` 暴露内网 IP
 - 比如 SQL 语法错误暴露表结构和字段名
 
-### 方案
+### 方案（初版）
 **服务端记录完整异常，客户端只看到友好提示。**
 
 ```python
 def friendly_error(e: Exception) -> str:
-    """把异常映射成用户可读的提示，不泄漏内部信息"""
     msg = str(e).lower()
     if "authentication" in msg or "401" in msg or "api key" in msg:
         return "模型服务认证失败，请联系管理员"
@@ -773,6 +777,34 @@ def friendly_error(e: Exception) -> str:
         return "请求过于频繁，请稍后再试"
     if "connection" in msg or "connect" in msg:
         return "服务暂时不可用，请稍后再试"
+    return "服务暂时不可用，请稍后再试"
+```
+
+### 新问题：子串匹配的误判
+这个初版用**子串匹配**判断异常类型，但 `"rate" in msg` 会误匹配：
+
+| 原始异常 | 被误判为 |
+|---|---|
+| `failed to generate response` | 请求过于频繁（因为 `generate` 里有 `rate`） |
+| `cannot operate on closed file` | 请求过于频繁（因为 `operate` 里有 `rate`） |
+| `separate connection failed` | 请求过于频繁（因为 `separate` 里有 `rate`） |
+
+**根本问题**：用自然语言子串匹配，边界情况多，不可靠。
+
+### 方案（修正版）
+**用异常类型 + HTTP 状态码判断，不做自然语言子串匹配。**
+
+```python
+def friendly_error(e: Exception) -> str:
+    status = getattr(e, "status_code", None)  # openai 异常带这个
+    if status == 401:
+        return "模型服务认证失败，请联系管理员"
+    if status == 429:
+        return "请求过于频繁，请稍后再试"
+    if isinstance(e, asyncio.TimeoutError):
+        return "请求超时，请稍后再试"
+    if isinstance(e, pymysql.MySQLError):
+        return "存储服务暂时不可用，请稍后再试"
     return "服务暂时不可用，请稍后再试"
 ```
 
@@ -788,17 +820,9 @@ except Exception as e:
     raise HTTPException(status_code=500, detail=friendly_error(e))
 ```
 
-流式接口里：
-
-```python
-except Exception as e:
-    print(f"[错误] {type(e).__name__}: {str(e)}")
-    yield f"data: {json.dumps({'error': friendly_error(e)}, ensure_ascii=False)}\n\n"
-```
-
 ### 为什么这么选
 - **安全**：不泄漏 API key、内网 IP、SQL 结构等
-- **用户体验**：客户端拿到的是人话，不是 Python 堆栈
+- **准确**：用异常类型 + 状态码，不会误判
 - **可排查**：服务端日志保留完整信息，运维能定位问题
 
 ### 收获
@@ -806,14 +830,14 @@ except Exception as e:
 - **服务端日志**：完整异常 + 堆栈，方便排查
 - **客户端响应**：映射后的友好提示，不泄漏内部信息
 
-这和"日志分级"是同一个思路：**详细信息和用户可见信息必须分开。**
+**更重要的教训**：用**结构化判断**（异常类型、状态码）而不是**自然语言匹配**（子串）。自然语言的边界情况太多，总有误判。
 
 ---
 
 ## 故事 19：缓存 key 不含上下文（缓存正确性）
 
 ### 问题
-在加了多轮对话后，缓存 key 只按 `thread_id + query` 组成：
+加了多轮对话后，缓存 key 从"只按 query"改成"按 thread_id + query"：
 
 ```python
 key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
@@ -830,7 +854,7 @@ key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
         → 但此时上下文变了（多了第 2 轮），答案应该不一样
 ```
 
-**根因**：`context_version`（上下文版本）没进 key，同一个 query 在不同上下文里命中同一缓存。
+**根因**：上下文没进 key，同一个 query 在不同上下文里命中同一缓存。
 
 ### 分析
 - 多轮对话下，**答案依赖上下文**，不只是 query
@@ -838,17 +862,14 @@ key = f"chat:{thread_id}:{hashlib.md5(query.encode()).hexdigest()}"
 - 只按 query 做 key，等于假设"同一问题答案永远一样"，这个假设在**多轮对话**下不成立
 - 这和故事 12（串台问题）是**同一类问题的不同表现**：
   - 故事 12：跨会话串台，靠 `thread_id` 解决
-  - 故事 19：同会话上下文错配，靠 `context_version` 解决
+  - 故事 19：同会话上下文错配，靠"上下文版本号"解决
 
-### 方案
+### 方案（初版）
 把**上下文版本号**也加进 key：
 
 ```python
 def get_context_version(thread_id: str) -> int:
-    """
-    获取该会话的上下文版本号（= MySQL 里的消息数）。
-    同一个问题在不同上下文里答案可能不同，所以缓存 key 必须带版本号。
-    """
+    """获取该会话的上下文版本号（= MySQL 里的消息数）"""
     conn = pymysql.connect(...)
     try:
         with conn.cursor() as cur:
@@ -870,22 +891,6 @@ def set_cache(thread_id: str, query: str, answer: str, context_version: int, ttl
     r.set(key, answer, ex=ttl)
 ```
 
-在接口里：
-
-```python
-# 1. 查缓存（key 带上下文版本号）
-context_version = get_context_version(thread_id)
-cached = get_cached(thread_id, payload.message, context_version)
-if cached:
-    return ChatResponse(reply=cached)
-
-# 2. 调 Agent
-...
-
-# 3. 写缓存（用当前 version）
-set_cache(thread_id, payload.message, answer, context_version)
-```
-
 **缓存 key 四段结构**：
 
 | 段 | 作用 |
@@ -904,24 +909,158 @@ set_cache(thread_id, payload.message, answer, context_version)
 
 第二次问同一个问题，因为 `context_version` 从 `v0` 变成 `v2`，**缓存 key 不一样，所以没命中，重新调了 Agent**。
 
-### 为什么这么做
-- **正确性优先**：RAG 系统不能返回错误答案，缓存命中率下降是可接受的
-- **简单可靠**：用消息数作为版本号，不需要额外维护状态
-- **可扩展**：如果将来 prompt 变了，可以再加一个 prompt 版本号
+### 新问题：命中率结构性为 0
+看起来"正确性优先"，但**实际是缓存彻底失效**：
 
-### 代价
-- 缓存命中率下降（因为按会话+版本分桶）
-- 但 RAG 场景下，用户极少在**完全相同的上下文里**问同一个问题
-- 从"错误命中"到"正确重新生成"，是值得的
+- `context_version` 来自 MySQL 行数
+- 每轮对话往 MySQL 写 2 行（human + ai）
+- 所以版本号每轮 **+2**
+- 同一个问题问第二次，key 一定不一样，**必然 miss**
+
+**结论**：这个缓存的命中率结构性为 0。除了增加两次 MySQL 查询开销，没有任何收益。
+
+### 最终方案：删掉缓存
+既然命中率为 0，缓存就是纯负优化。**直接删掉。**
+
+```python
+# 删掉的代码：
+# import redis
+# import hashlib
+# r = redis.Redis(...)
+# def get_context_version(...)
+# def get_cached(...)
+# def set_cache(...)
+
+# 简化为：
+@app.post("/chat")
+async def chat(payload: ChatRequest):
+    thread_id = payload.thread_id
+
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+
+    try:
+        result = await agent.ainvoke({...}, config=config)
+        answer = result["messages"][-1].content
+    except Exception as e:
+        raise HTTPException(500, detail=friendly_error(e))
+
+    try:
+        save_conversation(thread_id, "human", payload.message)
+        save_conversation(thread_id, "ai", answer)
+    except Exception as e:
+        print(f"[MySQL 写入失败] {type(e).__name__}: {str(e)}")
+
+    return ChatResponse(reply=answer)
+```
+
+### 为什么最终选择删缓存
+- **命中率为 0**：加了个寂寞
+- **破坏双源一致性**：缓存命中时写 MySQL，但 agent 的 checkpointer 没走
+- **负优化**：增加 2 次 MySQL 查询开销
+- **正确性 bug**：如果 context_version 算错，会返回错误答案
+
+**删掉比修更简单、更干净。**
 
 ### 收获
 **缓存设计要跟着数据模型演进。** 从单轮对话到多轮对话，缓存的假设从"query → 答案"变成"query + context → 答案"。**假设变了，key 的结构就要跟着改。**
 
-这也是**功能演进引发设计回归**的又一个例子（和故事 12 同一个家族）：
+**但更重要的是**：**缓存不是免费午餐。** 加缓存前先算账：
+- 命中率是多少？
+- 每次 miss 的代价 vs 每次命中的收益？
+- 缓存维护成本（key 设计、失效策略、一致性）？
+
+**如果命中率结构性为 0，缓存就是负优化。删掉是最优解。**
+
+这也是**功能演进引发设计回归**的又一个例子：
 - 加多轮对话 → 故事 12 发现串台 → 加 thread_id
 - 加多轮对话 → 故事 19 发现上下文错配 → 加 context_version
+- 加 context_version → 发现命中率 0 → **删掉整个缓存**
 
-**每次加功能，都要回头检查一遍所有的假设。**
+**每次加功能，都要回头检查一遍所有假设，包括"加这个功能到底值不值"。**
+
+---
+
+## 故事 20：requirements.txt 从未在干净环境验证
+
+### 问题
+项目里 `pip install` 装了一堆包，但 `requirements.txt` 只写了最初那 10 个。
+
+在干净 venv 里跑 `pip install -r requirements.txt` 后，`python -c "import rag_api.api_agent"` 立刻报错：
+```text
+ModuleNotFoundError: No module named 'redis'
+```
+
+### 分析
+代码里实际 import 的第三方包有 18 个，`requirements.txt` 里只声明了 10 个。**缺 8 个**：
+
+| 缺失包 | 被谁 import |
+|---|---|
+| `redis` | api_agent.py |
+| `pymysql` | api_agent.py |
+| `langchain-community` | mcp_rag_server.py（FAISS） |
+| `langchain-text-splitters` | mcp_rag_server.py（切分） |
+| `langgraph-checkpoint-sqlite` | api_agent.py（AsyncSqliteSaver） |
+| `aiosqlite` | AsyncSqliteSaver 的底层依赖 |
+| `jieba` | mcp_rag_server.py（中文分词） |
+| `rank-bm25` | mcp_rag_server.py（BM25） |
+
+**根因**：开发过程中逐个 `pip install` 补包，**忘了同步回 `requirements.txt`**。
+
+### 杀伤力
+- 面试官 clone 下来，`pip install -r requirements.txt` 装到一半就报错
+- Docker 构建时，容器里缺 `redis`，`uvicorn` 一 import 就崩
+- CI 流水线同理
+
+**这是"项目能不能在别人机器上跑"的最底线问题。**
+
+### 方案
+1. 遍历项目里所有 `.py` 文件，提取所有 `import` 语句
+2. 映射到对应的 pip 包名（注意：import 名里的下划线 `_` 通常要换成连字符 `-`）
+3. 补全 `requirements.txt`
+4. **在干净 venv 里验证**：
+   ```cmd
+   python -m venv .venv-test
+   .venv-test\Scripts\activate
+   pip install -r requirements.txt
+   python -c "import rag_api.api_agent; print('导入成功')"
+   ```
+
+### 修复后的清单（18 个）
+
+```text
+fastapi>=0.136.0
+uvicorn>=0.48.0
+langchain>=1.4.0
+langchain-openai>=1.6.0
+langchain-mcp-adapters>=0.3.0
+langchain-community>=0.4.0
+langchain-text-splitters>=1.0.0
+langgraph>=1.2.0
+langgraph-checkpoint-sqlite>=2.0.0
+aiosqlite>=0.20.0
+fastmcp>=3.4.0,<4.0.0
+sentence-transformers>=5.5.0
+faiss-cpu>=1.14.0
+python-dotenv>=1.2.0
+pymysql>=1.1.0
+jieba>=0.42.0
+rank-bm25>=0.2.2
+```
+
+（`redis` 暂时保留，预留做限流）
+
+### 为什么这个问题容易被忽略
+- 开发时，**你机器上碰巧有**这些包（之前手动装过）
+- 所以你本地能跑，感觉不到问题
+- 但换机器就崩
+
+**依赖清单必须经过干净环境验证，否则就是装饰品。**
+
+### 收获
+**每装一个新包，立刻 `pip freeze` 或手动补进 `requirements.txt`。** 更好的做法是用 `uv` 或 `poetry`，它们在装包时自动维护依赖清单，不需要手动同步。
+
+**面试时能讲**：
+> "我之前踩过一个坑：项目里 `pip install` 装了一堆包，但 `requirements.txt` 只写了最初那 10 个。后来在一个干净 venv 里跑 `pip install -r requirements.txt`，立刻发现 `redis`、`pymysql`、`jieba`、`rank-bm25` 这些都没声明。修法是把所有 `.py` 文件的 import 语句扫一遍，映射到 pip 包名，补全清单，再在新环境里验证。这件事让我意识到：依赖清单必须经过干净环境验证，否则就是装饰品。"
 
 ---
 
@@ -946,6 +1085,7 @@ set_cache(thread_id, payload.message, answer, context_version)
 | 记忆持久化 | 让 checkpointer 管历史，不要在框架外面手动糊一层 |
 | 架构重构 | 发现职责重叠就统一到单一真相源 |
 | 安全防护 | 服务端日志记详细，客户端响应给友好提示 |
-| 缓存正确性 | 缓存的 key 要覆盖所有影响答案的维度 |
+| 缓存正确性 | 缓存不是免费午餐，命中率结构性为 0 就删掉 |
+| 依赖管理 | requirements.txt 必须经过干净环境验证 |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**
