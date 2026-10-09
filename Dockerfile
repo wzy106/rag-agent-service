@@ -34,6 +34,9 @@ ENV HF_ENDPOINT=https://hf-mirror.com
 # 复制知识库文档（MCP Server 启动时从这里加载）
 COPY docs/ ./docs/
 
+# 复制公共检索模块（MCP Server 和评估脚本共用）
+COPY rag_core/ ./rag_core/
+
 # 复制 FAISS 索引（避免容器内重新 embedding）
 COPY faiss_index/ ./faiss_index/
 
