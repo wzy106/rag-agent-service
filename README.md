@@ -13,6 +13,8 @@ LangChain Agent（ReAct 循环）
     ↓ 工具调用
 MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
                             ↓
+                    rag_core/search.py（公共混合检索）
+                            ↓
                     降级判断（距离阈值）
                             ↓ 通过
                     混合检索（向量 + BM25 + 加权 RRF）
@@ -37,16 +39,17 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 
 ## 核心功能
 
-- **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，服务重启不丢历史
+- **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，服务重启/容器重建不丢历史
 - **RAG 检索增强**：本地 embedding（BAAI/bge-small-zh-v1.5）+ FAISS 持久化
 - **混合检索**：向量 + BM25 + 加权 RRF（向量 0.7 / BM25 0.3）
+- **公共检索模块**：`rag_core/search.py`，服务端和评估脚本共用同一份 `hybrid_search`
 - **降级策略**：向量距离阈值，检索不到就不调 LLM，避免幻觉
 - **MCP 工具解耦**：工具独立成 Server，跨进程 stdio 通信
 - **SSE 流式输出**：逐 token 返回，中间步骤过滤
 - **MySQL 展示层**：对话历史按 thread_id 持久化，供 `/history` 接口查询
 - **Agent 护栏**：`recursion_limit=10` + `max_tokens=2000`，防止死循环和 Token 爆炸
 - **友好错误处理**：异常映射为可读提示，不泄漏 API key、路径等内部信息
-- **RAG 评估**：30 个测试项，四指标对比（召回率 / 精确率 / MRR / 多样性）
+- **RAG 评估**：30 个测试项，四指标对比 + 随机基线，一条命令可复现
 - **Docker 部署**：多阶段构建，镜像 2.42 GB，一键启动
 
 ## 目录结构
@@ -54,6 +57,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 | 文件夹 | 内容 |
 |---|---|
 | `rag_api/` | FastAPI + Agent 服务（核心） |
+| `rag_core/search.py` | 公共检索模块（服务端 + 评估脚本共用） |
 | `mcp_test/mcp_rag_server.py` | RAG MCP Server |
 | `docs/` | 知识库文档（真实笔记） |
 | `eval/` | RAG 评估脚本 + 测试集 |
@@ -148,6 +152,7 @@ curl -X POST http://127.0.0.1:8000/chat \
   -d '{"message": "它和普通相似度检索有什么区别？", "thread_id": "test_001"}'
 
 # 重启服务后再问，仍能理解"它"指 MMR
+# docker compose down && docker compose up -d 后依然成立（checkpoints volume 持久化）
 ```
 
 ## 环境变量
@@ -160,27 +165,42 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 MYSQL_PASSWORD=your_mysql_password
 ```
 
+**Docker 容器额外环境变量**（由 docker-compose.yml 注入）：
+
+| 变量 | 值 | 说明 |
+|---|---|---|
+| `MYSQL_HOST` | `mysql` | 容器内用服务名，不用 localhost |
+| `HF_HOME` | `/root/.cache/huggingface` | 模型缓存目录 |
+| `HF_ENDPOINT` | `https://hf-mirror.com` | 国内镜像 |
+| `HF_HUB_OFFLINE` | `1` | 离线模式 |
+| `TRANSFORMERS_OFFLINE` | `1` | 离线模式 |
+| `DATA_DIR` | `/app/rag_api/data` | checkpoints 持久化目录 |
+
 ## RAG 评估
 
 构建 30 个测试项，四个指标对比：
 
 | 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
 |---|---|---|---|---|
-| 普通相似度 | 100% | **0.87** | 0.96 | 1.37 |
-| MMR | 100% | 0.83 | **0.97** | 1.43 |
-| MMR + 按来源去重 | 100% | 0.77 | **0.97** | **1.57** |
+| 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
+| MMR | 100% | 0.83 | 0.97 | 1.43 |
+| MMR + 按来源去重 | 100% | 0.77 | 0.97 | **1.57** |
+| **混合检索（向量+BM25+RRF）** | **100%** | **0.89** | **0.98** | 1.33 |
+| 随机基线 | **84.1%** | — | — | — |
 
 **关键发现**：
-- 精确率和多样性呈 trade-off：追求精确用相似度，需要多角度用 MMR+去重
-- MRR 三种策略都在 0.96 以上，Top-1 都很准
+- 混合检索在所有相关性指标上都略优于纯相似度：精确率 0.89 > 0.87，MRR 0.98 > 0.96
+- 精确率和多样性呈 trade-off：追求精确用混合检索/相似度，需要多角度用 MMR+去重
+- MRR 四种策略都在 0.96 以上，Top-1 都很准
 - 早期实验发现等权 RRF 反而比纯向量差（97%），加权后（向量 0.7 / BM25 0.3）恢复到 100%
 - 随机基线召回率 84.1%，说明当前 30 条样本的判别力有限（差 15.9 个点）
+
+> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线）。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
 
 运行评估：
 
 ```bash
-cd eval
-python eval_retrieval.py
+python eval/eval_retrieval.py
 ```
 
 ## 技术栈
@@ -188,7 +208,7 @@ python eval_retrieval.py
 - **Agent 编排**：LangChain 1.4 + LangGraph 1.2
 - **模型**：DeepSeek（OpenAI 兼容协议）
 - **工具协议**：MCP（FastMCP 3.4.8）
-- **检索**：sentence-transformers + FAISS + BM25 + 加权 RRF
+- **检索**：sentence-transformers + FAISS + BM25 + 加权 RRF（`rag_core/search.py` 公共模块）
 - **降级**：向量距离阈值
 - **记忆持久化**：AsyncSqliteSaver（生产可换 PostgresSaver）
 - **展示层**：MySQL
@@ -201,13 +221,16 @@ python eval_retrieval.py
 | 决策 | 原因 |
 |---|---|
 | 记忆统一到 LangGraph checkpointer | 避免 InMemorySaver + MySQL 双源打架 |
+| checkpoints 挂载到宿主机 | `docker compose down` 后记忆不丢（容器重建也持久） |
 | 删掉 Redis 缓存 | 命中率结构性为 0，是负优化 |
 | 检索层降级（距离阈值） | 比 Prompt 软约束更可靠，从根源避免幻觉 |
 | 错误映射为友好提示 | `str(e)` 可能泄漏 API key、路径等内部信息 |
 | 混合检索加权 RRF | 等权 RRF 实测反而比纯向量差（97%） |
+| 抽公共 `hybrid_search` 到 `rag_core/` | 服务端和评估脚本共用一份代码，保证"评估跑的就是部署的" |
 | Docker 多阶段构建 | builder 阶段装编译器，运行时不带，镜像从 3.51 GB 降到 2.42 GB |
 | CPU 版 torch | 项目只用 bge-small 做 embedding，CPU 毫秒级；下载量从 5 GB 降到 600 MB |
 | 模型缓存 volume 挂载 | 模型下载移出构建期，避免网络超时；重建不重下 |
+| HF_HOME 三级探测 | 环境变量 > 容器默认挂载点 > 项目内 hf_cache，本地和容器都能跑 |
 | FAISS 索引提交进 Git | 只有 248 KB，别人 clone 后可直接构建 |
 
 ## 已知不足

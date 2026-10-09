@@ -2,7 +2,7 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
-> 最后更新：2026-10-08（Docker 部署问题闭环 + checkpoints 持久化）
+> 最后更新：2026-10-09（新增 rag_core 公共模块 + 随机基线 84.1% 可复现）
 
 ## 一、项目简介（30 秒版本）
 
@@ -33,6 +33,8 @@ FastAPI（api_agent.py）
                    │ search_knowledge
                    ↓
     ┌─────────────────────────────────┐
+    │  rag_core/search.py（公共模块）   │
+    │       ↓                           │
     │  降级判断（距离阈值）              │
     │       ↓ 通过                      │
     │  混合检索：                        │
@@ -68,7 +70,7 @@ FastAPI（api_agent.py）
 | Agent 编排 | LangChain 1.4 + LangGraph 1.2 |
 | 模型 | DeepSeek（OpenAI 兼容协议） |
 | 工具协议 | MCP（FastMCP 3.4.8） |
-| 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF |
+| 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF（`rag_core/search.py` 公共模块） |
 | 降级 | 向量距离阈值（避免幻觉） |
 | 记忆持久化 | AsyncSqliteSaver（生产可换 PostgresSaver） |
 | 展示层 | MySQL（对话历史，只读） |
@@ -78,7 +80,7 @@ FastAPI（api_agent.py）
 
 ## 四、核心功能
 
-- **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启不丢
+- **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启/容器重建都不丢
 - RAG 检索增强（本地 embedding + FAISS 向量库）
 - 混合检索（向量 + BM25 + 加权 RRF）
 - 降级策略（距离阈值，避免幻觉）
@@ -90,11 +92,12 @@ FastAPI（api_agent.py）
 - 请求日志（收到消息 + 耗时统计）
 - FAISS 索引持久化（避免重复 embedding）
 - MySQL 持久化对话历史（展示层）
-- RAG 评估（召回率 + 精确率 + MRR + 多样性）
+- RAG 评估（召回率 + 精确率 + MRR + 多样性 + 随机基线）
 - **Docker 多阶段构建**（镜像从 3.51 GB 降到 2.42 GB）
 - **CPU 版 torch**（下载量从 5 GB 降到 600 MB）
 - **模型缓存 volume 挂载**（`hf_cache/` 挂宿主机，重建不重下）
 - **checkpoints volume 挂载**（`data/` 挂宿主机，容器重建不丢记忆）
+- **公共检索模块**（`rag_core/search.py`，服务端和评估脚本共用同一份 `hybrid_search`）
 
 ## 五、RAG 完整链路（面试重点）
 
@@ -142,7 +145,7 @@ class LocalEmbeddings(Embeddings):
 - 用本地 `BAAI/bge-small-zh-v1.5` 模型，512 维
 - 封装成 LangChain 的 `Embeddings` 接口
 - 完全离线，不消耗 API
-- **HF 缓存路径由 `HF_HOME` 环境变量控制**（三级探测，见面试题 21）
+- **HF 缓存路径由 `HF_HOME` 环境变量控制**（三级探测，见面试题 22）
 
 ### 4. 向量库 + 持久化
 
@@ -163,6 +166,8 @@ else:
 - 索引文件提交进 Git（248 KB，很小）
 
 ### 5. 检索策略
+
+> **实现位置（2026-10-09 起）**：下面所有检索函数在 `rag_core/search.py`，服务端 `mcp_rag_server.py` 和评估脚本 `eval_retrieval.py` 都从这里 import，保证"评估跑的就是部署的"。
 
 #### 5.1 相似度检索
 
@@ -202,12 +207,24 @@ bm25 = BM25Okapi(tokenized_corpus)
 **加权 RRF 合并**：
 
 ```python
-def hybrid_search(query, k=3, rrf_k=60, vector_weight=0.7, bm25_weight=0.3):
-    # 向量检索 Top-9
-    vector_results = vectorstore.similarity_search(query, k=k*3)
+def hybrid_search(query, vectorstore, bm25, all_docs, k=3, rrf_k=60,
+                  vector_weight=0.7, bm25_weight=0.3, max_distance=MAX_DISTANCE):
+    # 向量检索（带距离分数）
+    vector_results_with_scores = vectorstore.similarity_search_with_score(query, k=k*3)
+
+    if not vector_results_with_scores:
+        return []
+
+    # 降级判断：最佳向量距离太大 → 认为知识库中无相关内容
+    best_distance = vector_results_with_scores[0][1]
+    if best_distance > max_distance:
+        return []
+
+    # 拆出文档
+    vector_results = [doc for doc, _ in vector_results_with_scores]
     vector_ranks = {doc.page_content: i for i, doc in enumerate(vector_results)}
 
-    # BM25 检索 Top-9
+    # BM25 检索
     tokenized_query = list(jieba.cut(query))
     bm25_scores = bm25.get_scores(tokenized_query)
     bm25_top_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:k*3]
@@ -252,20 +269,6 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 
 ```python
 MAX_DISTANCE = 1.1   # 向量 L2 距离阈值
-
-def hybrid_search(query, k=3, max_distance=MAX_DISTANCE, ...):
-    vector_results_with_scores = vectorstore.similarity_search_with_score(query, k=k*3)
-
-    if not vector_results_with_scores:
-        return []
-
-    # 降级判断：最佳向量距离太大 → 认为知识库中无相关内容
-    best_distance = vector_results_with_scores[0][1]
-    if best_distance > max_distance:
-        return []
-
-    # 正常逻辑
-    ...
 ```
 
 `search_knowledge` 工具处理空结果：
@@ -273,7 +276,7 @@ def hybrid_search(query, k=3, max_distance=MAX_DISTANCE, ...):
 ```python
 @mcp.tool
 def search_knowledge(query: str) -> str:
-    results = hybrid_search(query, k=3)
+    results = hybrid_search(query, vectorstore, bm25, all_docs, k=3, verbose=True)
     if not results:
         return "知识库中没有找到相关信息。"
     return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
@@ -329,6 +332,7 @@ def search_knowledge(query: str) -> str:
 | **Windows wheel 不能给 Linux 容器用** | 宿主机是 `win_amd64` + `cp314`，容器是 `manylinux` + `cp312` | wheelhouse 作废，改用容器内直接下载 CPU 版 |
 | **MCP Server 硬编码 HF 缓存路径** | 代码写死 `Path.home()/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots` | 改成三级探测（环境变量 > 容器默认挂载点 > 项目 hf_cache） |
 | **checkpoints.db 无 volume** | DB 存在容器内部，`docker compose down` 后记忆全丢 | compose 加 `./data:/app/rag_api/data`，代码用 `DATA_DIR` 环境变量 |
+| **评估脚本和服务端代码分叉** | 两份 `hybrid_search`，参数还不一样 | 抽到 `rag_core/search.py`，两边都 import |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -529,7 +533,7 @@ result = await agent.ainvoke(
 
 ### 14. RAG 评估用什么指标？
 
-**四个指标**：
+**四个指标 + 随机基线**：
 
 | 指标 | 公式 | 含义 |
 |---|---|---|
@@ -537,17 +541,20 @@ result = await agent.ainvoke(
 | 精确率 | 平均（相关结果数 / Top-K 总数） | 找到的有多少是对的 |
 | MRR | 平均（1 / 第一个正确结果的排名） | 第一个正确结果排多前 |
 | 多样性 | 平均（Top-K 里不同文档数） | 结果覆盖多少不同来源 |
+| 随机基线 | 1 - C(N-n,k)/C(N,k) | 从 N 个 chunk 里随机抽 k 个，命中期望 source 的概率 |
 
 **实测数据**（30 个测试项）：
 
 | 策略 | 召回率 | 精确率 | MRR | 多样性 |
 |---|---|---|---|---|
-| 相似度 | 100% | 0.87 | 0.96 | 1.37 |
+| 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
 | MMR | 100% | 0.83 | 0.97 | 1.43 |
-| MMR + 去重 | 100% | 0.77 | 0.97 | 1.57 |
+| MMR + 去重 | 100% | 0.77 | 0.97 | **1.57** |
+| 混合检索 | 100% | **0.89** | **0.98** | 1.33 |
+| **随机基线** | **84.1%** | — | — | — |
 
 **面试话术**：
-> "我评估 RAG 用了四个指标。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。实测发现精确率和多样性呈 trade-off：追求精确用相似度，需要多角度用 MMR+去重。MRR 三种策略都在 0.96 以上，Top-1 都很准。"
+> "我评估 RAG 用了四个指标 + 随机基线。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。随机基线用组合公式精确计算——从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。四种策略都是 100% 召回，但对照这个地板就知道：我的测试集判别力有限（只有 15.9 个点的空间），下一步要扩语料到 500+ chunk 加 chunk 级标注。"
 
 ### 15. 错误信息怎么处理？
 
@@ -725,6 +732,41 @@ def _resolve_hf_home() -> str:
 **面试话术**：
 > "我 Docker 化时把模型下载从构建期移到运行时 volume 挂载。但改完启动容器报 `FileNotFoundError: snapshots 目录不存在`。根因是 MCP Server 硬编码了 HF 缓存路径，而且子进程的环境变量可能不完整。我改成三级探测：环境变量 > 容器默认挂载点 `/root/.cache/huggingface` > 项目内 `hf_cache/`。这样本地和容器都能跑。"
 
+### 23. 为什么要抽公共 `hybrid_search` 模块？
+
+**问题**：评估脚本和服务端各有一份 `hybrid_search` 实现，参数不一样（评估脚本缺距离降级），所以"评估跑的数字"描述的不是"部署的系统"。
+
+**修法**：抽到 `rag_core/search.py`，服务端和评估脚本都 `from rag_core.search import hybrid_search`。
+
+```python
+# rag_core/search.py
+def hybrid_search(query, vectorstore, bm25, all_docs, k=3, ...):
+    ...
+```
+
+**Dockerfile 也要加 COPY**：
+```dockerfile
+COPY rag_core/ ./rag_core/
+```
+
+**`mcp_rag_server.py` 加 sys.path hack**（脚本在 `mcp_test/` 子目录，找不到项目根的 `rag_core`）：
+```python
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from rag_core.search import hybrid_search, ...
+```
+
+**收益**：
+- 评估结果真实反映部署行为
+- 改一处，两端生效（比如调 `MAX_DISTANCE` 只需改一处）
+- 面试报的每个数字都能被复现
+- Dockerfile 加了 COPY，容器内也能 import
+
+**面试话术**：
+> "我之前评估脚本和服务端各写了一份 hybrid_search，参数还不一样——评估那份缺距离降级。发现后把检索逻辑抽到 rag_core/search.py，两边都 import，Dockerfile 也加了 COPY。这样评估脚本跑 python eval_retrieval.py 得到的数字就是部署系统的真实表现。"
+
 ## 八、项目数据（面试时能报的具体数字）
 
 - 工具数量：1 个（search_knowledge）
@@ -738,7 +780,7 @@ def _resolve_hf_home() -> str:
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
 - 展示层：MySQL（表 conversations）
-- 评估指标：召回率 / 精确率 / MRR / 多样性（30 个测试项）
+- 评估指标：召回率 / 精确率 / MRR / 多样性 / 随机基线（30 个测试项）
 - 首次 Docker 构建耗时：约 19 分钟（CUDA）→ **5~10 分钟**（CPU）
 - 单次请求耗时：2~3 秒
 - 镜像大小：10.4 GB → **2.42 GB**（content 519 MB）
@@ -748,6 +790,8 @@ def _resolve_hf_home() -> str:
 - FAISS 索引：已提交 Git（248 KB）
 - checkpoints 持久化：`./data/checkpoints.db`（volume 挂载，容器重建不丢）
 - data/ 目录：`.gitignore` 已忽略
+- 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用）
+- 评估可复现：`python eval/eval_retrieval.py` 一条命令跑出所有数字（含 84.1% 随机基线）
 
 ## 九、可演示的操作
 
@@ -760,7 +804,8 @@ def _resolve_hf_home() -> str:
 7. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
 8. 用浏览器打开 client.html，看打字机效果
 9. 展示 Docker 一键启动：`docker compose up -d`
-10. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+10. **展示评估可复现**：`python eval/eval_retrieval.py` → 一条命令输出所有指标 + 84.1% 随机基线
+11. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -1130,7 +1175,8 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 | 容器重建后记忆怎么不丢？ | checkpoints volume 挂载到宿主机 ./data/ |
 | 错误信息怎么处理？ | `friendly_error` 映射，用异常类型判断 |
 | 检索不到内容怎么处理？ | 距离阈值降级，返回"没找到"，不调 LLM |
-| RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 |
+| RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 + 随机基线 |
+| 评估怎么保证可复现？ | 抽公共 `rag_core/search.py`，一条命令跑出所有数字 |
 
 ## 十三、RAG 评估（面试重点）
 
@@ -1143,70 +1189,100 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 ### 评估脚本核心
 
 ```python
-def evaluate(search_fn, name, k=3):
-    hit = 0
-    for item in test_set:
-        results = search_fn(item["question"], k)
-        sources = [doc.metadata["source"] for doc in results]
-        if any(exp in sources for exp in item["expected_sources"]):
-            hit += 1
-        else:
-            print(f"❌ {item['question']} → 期望 {item['expected_sources']}，实际 {sources}")
-    recall = hit / len(test_set)
-    print(f"[{name}] 召回率：{hit}/{len(test_set)} = {recall:.0%}")
-
 def evaluate_full(search_fn, name, k=3):
     hit = 0
     precision_sum = 0
     mrr_sum = 0
+    diversity_sum = 0
 
     for item in test_set:
         results = search_fn(item["question"], k)
         sources = [doc.metadata["source"] for doc in results]
+        unique_sources = set(sources)
 
+        # 召回率
         if any(exp in sources for exp in item["expected_sources"]):
             hit += 1
 
+        # 精确率
         if sources:
             relevant = sum(1 for s in sources if s in item["expected_sources"])
             precision_sum += relevant / len(sources)
 
+        # MRR
         for rank, s in enumerate(sources, 1):
             if s in item["expected_sources"]:
                 mrr_sum += 1 / rank
                 break
 
+        # 多样性
+        diversity_sum += len(unique_sources)
+
     n = len(test_set)
-    print(f"[{name}]")
-    print(f"  召回率：{hit}/{n} = {hit/n:.0%}")
-    print(f"  精确率：{precision_sum/n:.2f}")
-    print(f"  MRR：{mrr_sum/n:.2f}")
+    return {
+        "recall": hit / n,
+        "precision": precision_sum / n,
+        "mrr": mrr_sum / n,
+        "diversity": diversity_sum / n,
+    }
+```
+
+### 随机基线（组合公式精确计算）
+
+```python
+from math import comb
+from collections import Counter
+
+def random_baseline(test_set, all_docs, k=3):
+    """
+    从全部 chunk 里随机抽 k 个，算 source 级召回率期望。
+    P(至少命中一个期望 source) = 1 - C(N - n_expected, k) / C(N, k)
+    """
+    n_total = len(all_docs)
+    source_counts = Counter(doc.metadata["source"] for doc in all_docs)
+
+    total = 0.0
+    for item in test_set:
+        n_expected = sum(source_counts.get(s, 0) for s in item["expected_sources"])
+        prob = 1 - comb(n_total - n_expected, k) / comb(n_total, k)
+        total += prob
+    return total / len(test_set)
 ```
 
 ### 评估结果（当前 2 个文档 / 102 chunk）
 
 | 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
 |---|---|---|---|---|
-| 普通相似度 | 100% | **0.87** | 0.96 | 1.37 |
-| MMR | 100% | 0.83 | **0.97** | 1.43 |
-| MMR + 按来源去重 | 100% | 0.77 | **0.97** | **1.57** |
+| 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
+| MMR | 100% | 0.83 | 0.97 | 1.43 |
+| MMR + 按来源去重 | 100% | 0.77 | 0.97 | **1.57** |
+| **混合检索（向量+BM25+RRF）** | **100%** | **0.89** | **0.98** | 1.33 |
+| 随机基线 | **84.1%** | — | — | — |
+
+> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线）。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
 
 ### 关键发现
 
-**1. 精确率和多样性呈明显 trade-off**
+**1. 混合检索在所有相关性指标上都略优于纯相似度**
 
-- 相似度：精确率最高（0.87），多样性最低（1.37）
+- 精确率：混合 0.89 > 相似度 0.87
+- MRR：混合 0.98 > 相似度 0.96
+- 多样性：混合 1.33 < 相似度 1.37（略低，因为 RRF 更偏向高相关内容）
+
+**2. 精确率和多样性呈明显 trade-off**
+
+- 相似度/混合检索：精确率最高，多样性最低
 - MMR + 去重：多样性最高（1.57），精确率最低（0.77）
 
-**2. MRR 几乎不变（0.96~0.97）**
+**3. MRR 几乎不变（0.96~0.98）**
 
-三种策略的 Top-1 都很准。
+四种策略的 Top-1 都很准。
 
-**3. 选哪个策略取决于业务**
+**4. 选哪个策略取决于业务**
 
 | 场景 | 推荐策略 |
 |---|---|
-| 追求精确（如事实查询） | 相似度 |
+| 追求精确（如事实查询） | 混合检索 / 相似度 |
 | 需要多角度（如分析任务） | MMR + 去重 |
 | 平衡 | MMR |
 
@@ -1238,7 +1314,7 @@ def evaluate_full(search_fn, name, k=3):
 - **文档级召回而非 chunk 级**：用 `source`（文件名）判断命中，只有两三篇文档，命中太容易，含金量不高。生产环境应该标注 chunk id 或关键句。
 - **30 条样本太少**：3% 的差异（97% vs 93%）是一条样本的差别，统计上无意义。应该扩到 200 条以上。
 - **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness。
-- **随机基线**：当前随机检索的召回率是 84.1%，三种策略全 100%，**判别力不足**。
+- **随机基线 84.1%**：语料太小（2 文档/102 chunk），天花板效应明显，判别空间只有 15.9 个点。
 
 **架构层面**：
 | 位置 | 问题 | 生产级解法 |
@@ -1251,6 +1327,7 @@ def evaluate_full(search_fn, name, k=3):
 | ~~Docker 部署~~ | ~~Dockerfile 缺 COPY docs/，compose 缺 network，host 写死 localhost~~ | ✅ 2026-10-08 已修复 |
 | ~~HF 缓存路径硬编码~~ | ~~`Path.home()/.cache/huggingface/...` 依赖精确路径~~ | ✅ 2026-10-08 已修复：三级探测 |
 | ~~checkpoints 无 volume~~ | ~~`docker compose down` 后记忆全丢~~ | ✅ 2026-10-08 已修复：挂载到 `./data/` |
+| ~~评估代码分叉~~ | ~~评估脚本和服务端各有一份 hybrid_search，参数不一致~~ | ✅ 2026-10-09 已修复：抽到 `rag_core/search.py` |
 
 ### 改进方案
 
@@ -1259,6 +1336,7 @@ def evaluate_full(search_fn, name, k=3):
 | 混合检索 | 向量 + BM25，加权合并 | ✅ 已做 |
 | 降级策略 | 距离阈值拦截无关问题 | ✅ 已做 |
 | 多指标评估 | 召回率 + 精确率 + MRR + 多样性 | ✅ 已做 |
+| 随机基线 | 组合公式精确计算 | ✅ 已做 |
 | 友好错误提示 | friendly_error 映射（异常类型） | ✅ 已做 |
 | 删掉无效缓存 | 命中率结构性为 0 | ✅ 已做 |
 | Docker 多阶段构建 | 3.51 GB → 2.42 GB | ✅ 已做 |
@@ -1266,6 +1344,7 @@ def evaluate_full(search_fn, name, k=3):
 | 模型缓存 volume 挂载 | 重建不重下 | ✅ 已做 |
 | checkpoints volume 挂载 | 容器重建不丢记忆 | ✅ 已做 |
 | HF_HOME 三级探测 | 本地/容器都能跑 | ✅ 已做 |
+| 抽公共检索模块 | rag_core/search.py | ✅ 已做 |
 | Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ⏳ 待做 |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
 | 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
@@ -1273,7 +1352,7 @@ def evaluate_full(search_fn, name, k=3):
 
 ### 面试答题模板
 
-> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标：召回率、精确率、MRR、多样性。实测发现精确率和多样性呈 trade-off：纯相似度精确率 0.87、多样性 1.37；MMR+去重多样性 1.57、精确率 0.77。MRR 三种策略都在 0.96 以上，Top-1 都很准。我还算过随机基线——从 102 个 chunk 里随便抽 3 个，召回率 84.1%。这说明我的测试集判别力不够，下一步要扩到 200 条 + chunk 级标注。"
+> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。实测发现：混合检索精确率 0.89、MRR 0.98，都略优于纯相似度的 0.87 / 0.96；MMR+去重多样性 1.57，但精确率降到 0.77。四种策略都是 100% 召回，但对照随机基线 84.1%，说明我的测试集判别力有限（只有 15.9 个点）。下一步要扩到 200 条 + chunk 级标注。所有数字都能用 `python eval/eval_retrieval.py` 一条命令复现——评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。"
 
 ## 十四、Docker 部署完整方案（面试重点）
 
@@ -1310,6 +1389,7 @@ ENV HF_HOME=/root/.cache/huggingface
 ENV HF_ENDPOINT=https://hf-mirror.com
 
 COPY docs/ ./docs/
+COPY rag_core/ ./rag_core/
 COPY faiss_index/ ./faiss_index/
 COPY mcp_test/mcp_rag_server.py ./mcp_test/mcp_rag_server.py
 COPY rag_api/api_agent.py ./rag_api/api_agent.py
@@ -1343,7 +1423,6 @@ services:
     env_file:
       - .env
     environment:
-      # 容器内 localhost 指容器自己，必须用服务名 mysql
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=root
@@ -1352,12 +1431,9 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
-      # checkpointer 持久化目录（挂载到宿主机 ./data）
       - DATA_DIR=/app/rag_api/data
     volumes:
-      # 模型缓存挂载到宿主机，避免每次重建都重新下载
       - ./hf_cache:/root/.cache/huggingface
-      # LangGraph checkpointer 持久化，避免容器重建时记忆丢失
       - ./data:/app/rag_api/data
     depends_on:
       - mysql
@@ -1382,7 +1458,9 @@ torch
 
 **原理**：PyTorch 官方 CPU 源里 torch 版本是 `2.9.0+cpu`，按 PEP 440 规则 `2.9.0+cpu > 2.9.0`，pip 自动选 CPU 版。
 
-### 14.4 部署踩坑时间线（2026-10-08）
+### 14.4 部署踩坑时间线
+
+**2026-10-08（Docker 部署问题闭环）**
 
 | 时间 | 问题 | 动作 |
 |---|---|---|
@@ -1396,17 +1474,27 @@ torch
 | 20:20 | 宿主机 `snapshot_download` 到 `hf_cache/` | 192 MB 下完 |
 | 20:30 | 重启容器 | `Application startup complete.` ✅ |
 | 20:35 | 端到端测试（chat / stream / 多轮记忆） | 全过 ✅ |
-| 20:40 | Git 提交 + 推送 | 3 个 commit |
 | 21:00 | 发现 `docker compose down` 后记忆全丢 | checkpoints 无 volume |
 | 21:10 | 改 `DATA_DIR` + compose 加 volume | 跨容器重建记忆保留 ✅ |
 
+**2026-10-09（评估可复现 + 抽公共模块）**
+
+| 时间 | 问题 | 动作 |
+|---|---|---|
+| 16:50 | 抽 `rag_core/search.py` 公共模块 | 服务端 import 改公共模块 ✅ |
+| 17:00 | Dockerfile 加 `COPY rag_core/` | 容器重建成功 ✅ |
+| 17:06 | `mcp_rag_server.py` 加 sys.path hack | 本地/容器都能 import ✅ |
+| 17:10 | 评估脚本重写（加随机基线） | 跑出 84.1% ✅ |
+| 17:15 | 删掉 `eval/hybrid_search_test.py` | 分叉实现清理 ✅ |
+| 17:20 | Git 提交 + 推送 | `99af642` ✅ |
+
 ### 14.5 面试话术（Docker 部署）
 
-> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要 bge-small-zh-v1.5 模型，我把它下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
+> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要 bge-small-zh-v1.5 模型，我把它下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码，评估跑的 `python eval/eval_retrieval.py` 得到的数字就是部署系统的真实表现。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
 
 ## 十五、项目新增数据（更新）
 
-### Docker 部署相关（2026-10-08）
+### Docker 部署相关（2026-10-08 ~ 2026-10-09）
 
 - Docker 数据位置：`D:\Docker`（55.73 GB）
 - C 盘可用空间：10.20 GB → **65.25 GB**
@@ -1417,12 +1505,14 @@ torch
 - 宿主机平台：Windows/amd64（`win_amd64` wheel，Python 3.14 `cp314`）
   - **注意**：两者不通用，宿主机下 wheel 给容器用是错的
 - checkpoints 持久化：`./data/checkpoints.db`（volume 挂载）
+- 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用）
 
-### Git 仓库状态（2026-10-08）
+### Git 仓库状态（最新）
 
 - 新增 commit：
-  - `d7967f6` docs: 更新复盘笔记与 README，补充 Docker 部署和踩坑经验
+  - `99af642` refactor: 抽公共 hybrid_search 到 rag_core，评估脚本加随机基线
   - `6f9f286` fix: 修复 HF 缓存路径和 checkpoints 持久化
+  - `d7967f6` docs: 更新复盘笔记与 README，补充 Docker 部署和踩坑经验
 - `.gitignore` 关键规则：
   - `hf_cache/`（模型缓存，192 MB+）
   - `data/`（checkpoints 持久化目录）
@@ -1438,11 +1528,12 @@ torch
 - 新增接口：`GET /history?thread_id=user_001&limit=20`
 - 评估集规模：30 个测试项
 - 当前知识库：2 个文档、102 个 chunk
-- 评估指标：召回率 / 精确率 / MRR / 多样性
-- 随机检索基线：84.1%
+- 评估指标：召回率 / 精确率 / MRR / 多样性 / 随机基线
+- 随机检索基线：**84.1%**（组合公式精确计算）
 - 相似度：召回率 100%，精确率 0.87，MRR 0.96，多样性 1.37
 - MMR：召回率 100%，精确率 0.83，MRR 0.97，多样性 1.43
 - MMR + 去重：召回率 100%，精确率 0.77，MRR 0.97，多样性 1.57
+- **混合检索：召回率 100%，精确率 0.89，MRR 0.98，多样性 1.33**（相关性指标最优）
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=1.1
 - 护栏参数：recursion_limit=10, max_tokens=2000
@@ -1452,8 +1543,10 @@ torch
 - Redis：依赖保留，预留做限流
 - 错误处理：`friendly_error` 用异常类型映射，不泄漏内部信息
 - requirements.txt：18 个包 + 顶部 2 行（CPU 索引），已在干净 venv 里验证可导入
+- 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用同一份 `hybrid_search`）
+- 评估可复现：`python eval/eval_retrieval.py` 一条命令输出所有指标 + 84.1% 随机基线
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ---
 
-**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通**，可进入评估优化或面试冲刺阶段。
+**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通且评估可复现**，可进入面试冲刺阶段。

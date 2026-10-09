@@ -2,7 +2,7 @@
 
 > 记录项目开发过程中遇到的问题、分析过程和解决方案。
 > 每个故事按"问题 → 分析 → 方案 → 收获"结构。
-> 最后更新：2026-10-08（新增 Docker 部署系列 7 个故事）
+> 最后更新：2026-10-09（新增故事 28：评估代码分叉）
 
 ## 快速索引
 
@@ -30,6 +30,7 @@
 | **跨平台 wheel 陷阱** | **故事 25** |
 | **模型缓存与容器** | **故事 26** |
 | **checkpoints 持久化** | **故事 27** |
+| **评估代码分叉** | **故事 28** |
 
 ---
 
@@ -1575,6 +1576,101 @@ curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "
 
 ---
 
+## 故事 28：评估代码和部署代码分叉（2026-10-09）
+
+### 问题
+项目里有两份 `hybrid_search`：
+- `mcp_test/mcp_rag_server.py`：有 `max_distance` 降级
+- `eval/hybrid_search_test.py`：没有降级
+
+**所以 README 里"混合检索加权 RRF"的数字，描述的不是部署的系统。**
+
+更糟的是：评估脚本没有随机基线。"三种策略都是 100% 召回率"看起来很漂亮，但没有对照系——不知道这个 100% 含金量是多少。
+
+### 分析
+**为什么会出现分叉**：开发时"顺手复制一份改改"最省事，不用考虑模块化。这在单个文件里没问题，但一旦有**多个消费方**（服务端 + 评估脚本 + 未来的测试），分叉就变成隐藏 bug。
+
+**为什么必须修**：
+- 面试官问"你 README 里的数字怎么来的"，答不出可复现的脚本就是扣分
+- 招聘方最关心的不是"结果多好"，而是"结果可信吗"
+- 无随机基线 = 不知道自己离天花板有多远
+
+### 方案
+
+**① 抽公共模块 `rag_core/search.py`**：
+```python
+# rag_core/search.py
+def hybrid_search(query, vectorstore, bm25, all_docs, k=3, ...):
+    ...
+```
+服务端和评估都 `from rag_core.search import hybrid_search`。
+
+**② Dockerfile 加 COPY**：
+```dockerfile
+COPY rag_core/ ./rag_core/
+```
+
+**③ `mcp_rag_server.py` 加 sys.path hack**（脚本在 `mcp_test/` 子目录，找不到项目根的 `rag_core`）：
+```python
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from rag_core.search import hybrid_search, ...
+```
+
+**④ 评估脚本加随机基线**（组合公式精确计算，不用模拟）：
+```python
+from math import comb
+from collections import Counter
+
+def random_baseline(test_set, all_docs, k=3):
+    """
+    从全部 chunk 里随机抽 k 个，算 source 级召回率期望。
+    P(至少命中一个期望 source) = 1 - C(N - n_expected, k) / C(N, k)
+    """
+    n_total = len(all_docs)
+    source_counts = Counter(doc.metadata["source"] for doc in all_docs)
+
+    total = 0.0
+    for item in test_set:
+        n_expected = sum(source_counts.get(s, 0) for s in item["expected_sources"])
+        prob = 1 - comb(n_total - n_expected, k) / comb(n_total, k)
+        total += prob
+    return total / len(test_set)
+```
+
+**⑤ 删掉旧的 `eval/hybrid_search_test.py`。**
+
+### 效果
+跑 `python eval/eval_retrieval.py`：
+```
+[随机基线] 召回率：84.1%
+
+策略                              召回率      精确率      MRR      多样性
+普通相似度                        100.0%     0.87     0.96     1.37
+MMR                              100.0%     0.83     0.97     1.43
+MMR + 按来源去重                  100.0%     0.77     0.97     1.57
+混合检索（向量+BM25+RRF）          100.0%     0.89     0.98     1.33
+```
+
+**四条策略都 100% 召回，但对照随机基线 84.1%，就能看出：**
+- 召回的判别空间只有 15.9 个点（102 个 chunk 只有 2 个文档，命中太容易）
+- 精确率/MRR/多样性 才是真正区分策略的指标
+- 混合检索的精确率 0.89 和 MRR 0.98 都略优于纯相似度
+
+### 收获
+**任何被多个消费方引用的逻辑，都要抽公共模块。** 复制粘贴在当时省事，但埋下"两份实现漂移"的雷。
+
+**评估脚本必须能自己跑出所有报出的数字。** 别人 clone 项目后跑一条命令，能验证 README 里每张表的每个数字——这是"可信"的最基本要求。
+
+**随机基线是评估的地板，不是天花板。** 没有地板就无法判断"100% 召回"到底含金量多高。你项目的 84.1% 基线说明：语料太小，判别力被天花板压住了。下一步要扩语料到 500+ chunk + chunk 级标注。
+
+**面试时能讲**：
+> "我评估脚本和服务端各写了一份 hybrid_search，参数还不一样——评估那份缺距离降级。发现后把检索逻辑抽到 rag_core/search.py，两边都 import，Dockerfile 也加了 COPY。同时给评估脚本加了随机基线，用组合公式精确计算，跑出来 84.1%。四种策略都 100% 召回，但对照这个地板就知道：我的测试集判别力有限，下一步要扩语料到 500+ chunk 加 chunk 级标注。"
+
+---
+
 ## 总结
 
 这些坑覆盖了 Agent 开发中常见的几类问题：
@@ -1603,5 +1699,6 @@ curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "
 | **跨平台 wheel 陷阱** | **wheel 是平台相关的，宿主机给容器下 wheel 必须指定 `--platform`** |
 | **模型缓存与容器** | **别硬编码 HF 缓存路径；三级探测让本地和容器都能跑** |
 | **checkpoints 持久化** | **`docker compose down` 会丢记忆，必须挂 volume 到宿主机** |
+| **评估代码分叉** | **任何被多消费方引用的逻辑都要抽公共模块；评估脚本必须能自己跑出所有报出的数字** |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**
