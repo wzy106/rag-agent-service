@@ -2,7 +2,7 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
-> 最后更新：2026-10-09（新增 rag_core 公共模块 + 随机基线 84.1% 可复现）
+> 最后更新：2026-10-10（新增 MAX_DISTANCE 阈值标定：1.1 → 1.0）
 
 ## 一、项目简介（30 秒版本）
 
@@ -35,7 +35,7 @@ FastAPI（api_agent.py）
     ┌─────────────────────────────────┐
     │  rag_core/search.py（公共模块）   │
     │       ↓                           │
-    │  降级判断（距离阈值）              │
+    │  降级判断（MAX_DISTANCE=1.0）      │
     │       ↓ 通过                      │
     │  混合检索：                        │
     │  向量检索 Top-9  +  BM25 Top-9    │
@@ -71,7 +71,7 @@ FastAPI（api_agent.py）
 | 模型 | DeepSeek（OpenAI 兼容协议） |
 | 工具协议 | MCP（FastMCP 3.4.8） |
 | 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF（`rag_core/search.py` 公共模块） |
-| 降级 | 向量距离阈值（避免幻觉） |
+| 降级 | 向量距离阈值（标定 1.0，避免幻觉） |
 | 记忆持久化 | AsyncSqliteSaver（生产可换 PostgresSaver） |
 | 展示层 | MySQL（对话历史，只读） |
 | 服务 | FastAPI + Uvicorn |
@@ -83,7 +83,7 @@ FastAPI（api_agent.py）
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启/容器重建都不丢
 - RAG 检索增强（本地 embedding + FAISS 向量库）
 - 混合检索（向量 + BM25 + 加权 RRF）
-- 降级策略（距离阈值，避免幻觉）
+- 降级策略（距离阈值标定 1.0，避免幻觉）
 - MCP 工具解耦（Agent 和工具分进程）
 - SSE 流式输出（打字机效果）
 - 中间步骤过滤（只输出最终回答）
@@ -93,6 +93,7 @@ FastAPI（api_agent.py）
 - FAISS 索引持久化（避免重复 embedding）
 - MySQL 持久化对话历史（展示层）
 - RAG 评估（召回率 + 精确率 + MRR + 多样性 + 随机基线）
+- **阈值标定**（正负样本距离分布 + PR 曲线）
 - **Docker 多阶段构建**（镜像从 3.51 GB 降到 2.42 GB）
 - **CPU 版 torch**（下载量从 5 GB 降到 600 MB）
 - **模型缓存 volume 挂载**（`hf_cache/` 挂宿主机，重建不重下）
@@ -268,7 +269,10 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 **方案**：在检索层加距离阈值，超过就返回"没找到"。
 
 ```python
-MAX_DISTANCE = 1.1   # 向量 L2 距离阈值
+# 通过 eval/calibrate_distance.py 标定（2026-10-10）：
+# Precision=0.967, Recall=0.967, F1=0.967
+# 相比原值 1.1（P=0.909），幻觉率从 9.1% 降到 3.3%
+MAX_DISTANCE = 1.0
 ```
 
 `search_knowledge` 工具处理空结果：
@@ -282,22 +286,33 @@ def search_knowledge(query: str) -> str:
     return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
 ```
 
-**阈值怎么定（实测数据）**：
+**阈值标定实验（2026-10-10）**：
 
-| 类别 | 问题 | 距离 |
-|---|---|---|
-| 正常 | MMR 是什么？ | 0.82 |
-| 正常 | RAG 完整流程 | 0.89 |
-| 正常 | Docker 怎么部署 | 0.58 |
-| 无关 | 今天天气 | 1.27 |
-| 无关 | 红烧肉 | 1.30 |
-| 无关 | 股市 | 1.34 |
-| 乱码 | asdfghjkl | 1.15 |
+- 正样本 30 条（来自 `test_set.json`）+ 负样本 25 条（`negatives.json`）
+- 对每条问题算 `best_distance`（top-1 的 L2 距离）
+- 距离分布：
+  - 正样本：0.375 ~ 1.059（中位数 0.698）
+  - 负样本：0.854 ~ 1.468（中位数 1.271）
+  - **重叠区：[0.854, 1.059]**，宽 0.206
 
-**选 1.1 的原因**：
-- 正常问题最高 0.89，还有 0.21 余量
-- 乱码 1.15 也能被拦住
-- 无关问题 1.27+ 都被拦住
+**候选阈值对比**：
+
+| 阈值 | Precision | Recall | F1 | 业务含义 |
+|---|---|---|---|---|
+| 1.10（原值） | 0.909 | 1.000 | 0.952 | 幻觉率 9.1% |
+| 1.06（F1 最大） | 0.938 | 1.000 | 0.968 | 幻觉率 6.2% |
+| **1.00（最终）** | **0.967** | **0.967** | **0.967** | **幻觉率 3.3%，漏答 3.3%** |
+
+**为什么选 1.00 而不是 F1 最大的 1.06**：
+- RAG 场景用户对"编造"的容忍度远低于"不知道"
+- 用 3.3% 的漏答换幻觉率**减半**（9.1% → 3.3%）
+- 两个阈值 F1 一样（0.967），但业务上 1.00 更稳
+
+**产出**：
+- `eval/calibrate_distance.py`（标定脚本，可复现）
+- `eval/negatives.json`（25 条负样本）
+- `eval/output/distance_distribution.png`（距离分布图）
+- `eval/output/pr_curve.png`（PR 曲线）
 
 **为什么用向量距离，不用 RRF 分数**：
 - RRF 分数范围窄（0.005~0.02），无法区分好坏
@@ -333,6 +348,7 @@ def search_knowledge(query: str) -> str:
 | **MCP Server 硬编码 HF 缓存路径** | 代码写死 `Path.home()/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots` | 改成三级探测（环境变量 > 容器默认挂载点 > 项目 hf_cache） |
 | **checkpoints.db 无 volume** | DB 存在容器内部，`docker compose down` 后记忆全丢 | compose 加 `./data:/app/rag_api/data`，代码用 `DATA_DIR` 环境变量 |
 | **评估脚本和服务端代码分叉** | 两份 `hybrid_search`，参数还不一样 | 抽到 `rag_core/search.py`，两边都 import |
+| **MAX_DISTANCE 拍脑袋定** | 原值 1.1 是跑了几条样例的约数，无统计支撑 | `eval/calibrate_distance.py` 标定 → 1.0（P=0.967, R=0.967） |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -519,17 +535,17 @@ result = await agent.ainvoke(
 
 **降级策略**：
 
-1. **检索层**：用向量距离做阈值（`MAX_DISTANCE = 1.1`），超过就返回空
+1. **检索层**：用向量距离做阈值（`MAX_DISTANCE = 1.0`，标定得出），超过就返回空
 2. **工具层**：收到空结果时返回"知识库中没有找到相关信息"
 3. **不调 LLM**：从根源上避免模型基于无关片段产生幻觉
 
 **阈值怎么定**：
-- 实测正常问题距离 0.58~0.89
-- 实测无关问题距离 1.15~1.34
-- 选 1.1 能分开两类
+- 标定实验：正样本 30 条 + 负样本 25 条
+- 距离分布：正 0.375~1.059，负 0.854~1.468
+- 选 1.0：P=0.967, R=0.967（详见面试题 24）
 
 **面试话术**：
-> "我在检索层加了降级策略。用相似度距离做阈值，超过阈值就返回'知识库中没有相关信息'，不调 LLM。这样避免模型在缺乏依据时产生幻觉。阈值是通过实测校准的，我测了正常问题和无关问题的距离分布，选了能分开两类的最优值。"
+> "我在检索层加了降级策略。用相似度距离做阈值，超过阈值就返回'知识库中没有相关信息'，不调 LLM。这样避免模型在缺乏依据时产生幻觉。阈值不是拍脑袋定的——我构造了 30 条正样本和 25 条负样本做标定实验，取 P/R 平衡点为 1.0，幻觉率从 9.1% 降到 3.3%。"
 
 ### 14. RAG 评估用什么指标？
 
@@ -550,11 +566,11 @@ result = await agent.ainvoke(
 | 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
 | MMR | 100% | 0.83 | 0.97 | 1.43 |
 | MMR + 去重 | 100% | 0.77 | 0.97 | **1.57** |
-| 混合检索 | 100% | **0.89** | **0.98** | 1.33 |
+| 混合检索（降级 1.0） | 96.7% | 0.86 | 0.94 | 1.30 |
 | **随机基线** | **84.1%** | — | — | — |
 
 **面试话术**：
-> "我评估 RAG 用了四个指标 + 随机基线。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。随机基线用组合公式精确计算——从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。四种策略都是 100% 召回，但对照这个地板就知道：我的测试集判别力有限（只有 15.9 个点的空间），下一步要扩语料到 500+ chunk 加 chunk 级标注。"
+> "我评估 RAG 用了四个指标 + 随机基线。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。随机基线用组合公式精确计算——从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。四种策略对照这个地板就知道：我的测试集判别力有限（只有 15.9 个点的空间），下一步要扩语料到 500+ chunk 加 chunk 级标注。"
 
 ### 15. 错误信息怎么处理？
 
@@ -767,6 +783,43 @@ from rag_core.search import hybrid_search, ...
 **面试话术**：
 > "我之前评估脚本和服务端各写了一份 hybrid_search，参数还不一样——评估那份缺距离降级。发现后把检索逻辑抽到 rag_core/search.py，两边都 import，Dockerfile 也加了 COPY。这样评估脚本跑 python eval_retrieval.py 得到的数字就是部署系统的真实表现。"
 
+### 24. `MAX_DISTANCE` 阈值怎么定的？
+
+**不是拍脑袋定的，是标定出来的。**
+
+**方法**：
+1. 构造正样本（30 条知识库有问题）+ 负样本（25 条知识库没有的问题）
+2. 对每条问题算 `best_distance`（top-1 的 L2 距离）
+3. 画正负样本距离分布直方图，看分离点
+4. 扫 101 个候选阈值（0.5~1.5），计算 Precision / Recall / F1
+
+**结果**：
+
+| 阈值 | Precision | Recall | F1 |
+|---|---|---|---|
+| 1.10（原值） | 0.909 | 1.000 | 0.952 |
+| 1.06（F1 最大） | 0.938 | 1.000 | 0.968 |
+| **1.00（当前）** | **0.967** | **0.967** | **0.967** |
+
+**为什么选 1.00 而不是 F1 最大的 1.06**：
+- RAG 场景用户对"编造"的容忍度远低于"不知道"
+- 用 3.3% 的漏答换幻觉率**减半**（9.1% → 3.3%）
+- 两个阈值 F1 一样（0.967），但业务上 1.00 更稳
+
+**距离分布（图见 `eval/output/distance_distribution.png`）**：
+- 正样本 0.375 ~ 1.059（中位数 0.698）
+- 负样本 0.854 ~ 1.468（中位数 1.271）
+- 重叠区 [0.854, 1.059]，宽 0.206
+
+**产出**：
+- `eval/calibrate_distance.py`（标定脚本）
+- `eval/negatives.json`（25 条负样本）
+- `eval/output/distance_distribution.png`（距离分布图）
+- `eval/output/pr_curve.png`（PR 曲线）
+
+**面试话术**：
+> "MAX_DISTANCE=1.0 不是拍脑袋定的。我构造了 30 条正样本和 25 条负样本，对每条跑 best_distance，画分布直方图看分离点，再扫阈值从 0.5 到 1.5 画 PR 曲线。F1 最大化的点是 1.06，但我取了 1.00——因为这个点上精确率还能保持 96.7%，幻觉率从 9.1% 降到 3.3%，代价只是 3.3% 的漏答。RAG 场景下用户宁可听到'不知道'也不要被编造。标定脚本和结果图都在仓库里，可以复现。"
+
 ## 八、项目数据（面试时能报的具体数字）
 
 - 工具数量：1 个（search_knowledge）
@@ -776,7 +829,8 @@ from rag_core.search import hybrid_search, ...
 - 向量库：FAISS（本地持久化）
 - 检索策略：混合检索（向量 + BM25 + 加权 RRF）
 - RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
-- 降级阈值：MAX_DISTANCE=1.1
+- 降级阈值：MAX_DISTANCE=1.0（标定得出，P=0.967, R=0.967, F1=0.967）
+- 幻觉率：9.1% → 3.3%（用 3.3% 漏答换）
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
 - 展示层：MySQL（表 conversations）
@@ -792,6 +846,7 @@ from rag_core.search import hybrid_search, ...
 - data/ 目录：`.gitignore` 已忽略
 - 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用）
 - 评估可复现：`python eval/eval_retrieval.py` 一条命令跑出所有数字（含 84.1% 随机基线）
+- 阈值标定：`python eval/calibrate_distance.py`（正样本 30 + 负样本 25）
 
 ## 九、可演示的操作
 
@@ -805,7 +860,8 @@ from rag_core.search import hybrid_search, ...
 8. 用浏览器打开 client.html，看打字机效果
 9. 展示 Docker 一键启动：`docker compose up -d`
 10. **展示评估可复现**：`python eval/eval_retrieval.py` → 一条命令输出所有指标 + 84.1% 随机基线
-11. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+11. **展示阈值标定**：`python eval/calibrate_distance.py` → 输出正负样本距离分布 + PR 曲线
+12. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -1174,9 +1230,10 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 | Agent 多轮对话怎么实现？ | LangGraph checkpointer + AsyncSqliteSaver + DATA_DIR |
 | 容器重建后记忆怎么不丢？ | checkpoints volume 挂载到宿主机 ./data/ |
 | 错误信息怎么处理？ | `friendly_error` 映射，用异常类型判断 |
-| 检索不到内容怎么处理？ | 距离阈值降级，返回"没找到"，不调 LLM |
+| 检索不到内容怎么处理？ | 距离阈值降级（标定 1.0），返回"没找到"，不调 LLM |
 | RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 + 随机基线 |
 | 评估怎么保证可复现？ | 抽公共 `rag_core/search.py`，一条命令跑出所有数字 |
+| 阈值怎么定？ | 正负样本距离分布 + PR 曲线标定 |
 
 ## 十三、RAG 评估（面试重点）
 
@@ -1256,25 +1313,24 @@ def random_baseline(test_set, all_docs, k=3):
 | 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
 | MMR | 100% | 0.83 | 0.97 | 1.43 |
 | MMR + 按来源去重 | 100% | 0.77 | 0.97 | **1.57** |
-| **混合检索（向量+BM25+RRF）** | **100%** | **0.89** | **0.98** | 1.33 |
+| 混合检索（带降级 1.0） | 96.7% | 0.86 | 0.94 | 1.30 |
 | 随机基线 | **84.1%** | — | — | — |
 
 > **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线）。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
 
 ### 关键发现
 
-**1. 混合检索在所有相关性指标上都略优于纯相似度**
+**1. 混合检索的精度取向**
 
-- 精确率：混合 0.89 > 相似度 0.87
-- MRR：混合 0.98 > 相似度 0.96
-- 多样性：混合 1.33 < 相似度 1.37（略低，因为 RRF 更偏向高相关内容）
+- 带降级（MAX_DISTANCE=1.0）后召回率 96.7%，精确率 0.86，略低于纯相似度（0.87）
+- 代价是 1 条正样本被拒答，换来 5.8 个百分点的幻觉率降低
 
 **2. 精确率和多样性呈明显 trade-off**
 
-- 相似度/混合检索：精确率最高，多样性最低
+- 相似度：精确率最高（0.87），多样性最低（1.37）
 - MMR + 去重：多样性最高（1.57），精确率最低（0.77）
 
-**3. MRR 几乎不变（0.96~0.98）**
+**3. MRR 几乎不变（0.94~0.97）**
 
 四种策略的 Top-1 都很准。
 
@@ -1282,7 +1338,7 @@ def random_baseline(test_set, all_docs, k=3):
 
 | 场景 | 推荐策略 |
 |---|---|
-| 追求精确（如事实查询） | 混合检索 / 相似度 |
+| 追求精确（如事实查询） | 相似度 |
 | 需要多角度（如分析任务） | MMR + 去重 |
 | 平衡 | MMR |
 
@@ -1321,7 +1377,7 @@ def random_baseline(test_set, all_docs, k=3):
 |---|---|---|
 | `/chat` 和 `/chat/stream` | pymysql 是**同步客户端**，在 async 路径上会阻塞事件循环 | 用 `aiomysql` |
 | `save_conversation` | 每次请求新建连接，没有连接池 | 用连接池（如 `DBUtils`） |
-| `MAX_DISTANCE = 1.1` | 阈值校准不够系统，是拍脑袋定的 | 对正负样本统计距离分布，取分离点 |
+| ~~`MAX_DISTANCE = 1.1`~~ | ~~阈值校准不够系统，是拍脑袋定的~~ | ✅ 2026-10-10 已修复：标定为 1.0（P=0.967, R=0.967） |
 | 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` 做来源判断 + 显式状态机 |
 | MCP Server 用了私有 API | `vectorstore.docstore._dict` 是内部 API，版本升级可能坏 | 构建索引时自己维护 chunks 列表并 pickle 落盘 |
 | ~~Docker 部署~~ | ~~Dockerfile 缺 COPY docs/，compose 缺 network，host 写死 localhost~~ | ✅ 2026-10-08 已修复 |
@@ -1345,6 +1401,7 @@ def random_baseline(test_set, all_docs, k=3):
 | checkpoints volume 挂载 | 容器重建不丢记忆 | ✅ 已做 |
 | HF_HOME 三级探测 | 本地/容器都能跑 | ✅ 已做 |
 | 抽公共检索模块 | rag_core/search.py | ✅ 已做 |
+| 阈值标定 | 正负样本距离分布 + PR 曲线 | ✅ 已做（MAX_DISTANCE 1.1→1.0） |
 | Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ⏳ 待做 |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
 | 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
@@ -1352,7 +1409,7 @@ def random_baseline(test_set, all_docs, k=3):
 
 ### 面试答题模板
 
-> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。实测发现：混合检索精确率 0.89、MRR 0.98，都略优于纯相似度的 0.87 / 0.96；MMR+去重多样性 1.57，但精确率降到 0.77。四种策略都是 100% 召回，但对照随机基线 84.1%，说明我的测试集判别力有限（只有 15.9 个点）。下一步要扩到 200 条 + chunk 级标注。所有数字都能用 `python eval/eval_retrieval.py` 一条命令复现——评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。"
+> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。实测发现：纯相似度召回 100%、精确率 0.87；混合检索带距离降级后召回 96.7%、精确率 0.86，代价是 1 条正样本被拒，换来 5.8 个百分点的幻觉率降低。MMR+去重多样性 1.57，但精确率降到 0.77。四种策略对照随机基线 84.1%，说明我的测试集判别力有限（只有 15.9 个点）。降级阈值 MAX_DISTANCE 也是标定出来的——正样本 30 条 + 负样本 25 条，扫 101 个候选点选 P/R 平衡点 1.0，幻觉率从 9.1% 降到 3.3%。所有数字都能用 `python eval/eval_retrieval.py` 和 `python eval/calibrate_distance.py` 复现。"
 
 ## 十四、Docker 部署完整方案（面试重点）
 
@@ -1488,13 +1545,25 @@ torch
 | 17:15 | 删掉 `eval/hybrid_search_test.py` | 分叉实现清理 ✅ |
 | 17:20 | Git 提交 + 推送 | `99af642` ✅ |
 
+**2026-10-10（阈值标定）**
+
+| 时间 | 问题 | 动作 |
+|---|---|---|
+| 19:20 | 构造 25 条负样本 | `eval/negatives.json` ✅ |
+| 19:30 | 写标定脚本 | `eval/calibrate_distance.py` ✅ |
+| 19:56 | 画两张图 | `eval/output/*.png` ✅ |
+| 20:00 | 分析：1.1 偏松，F1 最大 1.06，P≥0.95 最高召回 1.00 | 决策选 1.00 ✅ |
+| 20:10 | 改 `MAX_DISTANCE = 1.0` | 幻觉率 9.1% → 3.3% ✅ |
+| 20:20 | 重跑评估，混合检索召回 100% → 96.7% | 有意取舍 ✅ |
+| 20:30 | Git 提交 | `466e671` ✅ |
+
 ### 14.5 面试话术（Docker 部署）
 
-> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要 bge-small-zh-v1.5 模型，我把它下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码，评估跑的 `python eval/eval_retrieval.py` 得到的数字就是部署系统的真实表现。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
+> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要 bge-small-zh-v1.5 模型，我把它下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 1.0，幻觉率从 9.1% 降到 3.3%。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
 
 ## 十五、项目新增数据（更新）
 
-### Docker 部署相关（2026-10-08 ~ 2026-10-09）
+### Docker 部署相关（2026-10-08 ~ 2026-10-10）
 
 - Docker 数据位置：`D:\Docker`（55.73 GB）
 - C 盘可用空间：10.20 GB → **65.25 GB**
@@ -1506,10 +1575,14 @@ torch
   - **注意**：两者不通用，宿主机下 wheel 给容器用是错的
 - checkpoints 持久化：`./data/checkpoints.db`（volume 挂载）
 - 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用）
+- 阈值标定：`eval/calibrate_distance.py`（正样本 30 + 负样本 25）
+- MAX_DISTANCE：1.1 → **1.0**（P=0.967, R=0.967, F1=0.967）
+- 幻觉率降低：9.1% → **3.3%**（用 3.3% 漏答换）
 
 ### Git 仓库状态（最新）
 
 - 新增 commit：
+  - `466e671` feat: 标定 MAX_DISTANCE 阈值（1.1 → 1.0），幻觉率从 9.1% 降到 3.3%
   - `99af642` refactor: 抽公共 hybrid_search 到 rag_core，评估脚本加随机基线
   - `6f9f286` fix: 修复 HF 缓存路径和 checkpoints 持久化
   - `d7967f6` docs: 更新复盘笔记与 README，补充 Docker 部署和踩坑经验
@@ -1533,9 +1606,9 @@ torch
 - 相似度：召回率 100%，精确率 0.87，MRR 0.96，多样性 1.37
 - MMR：召回率 100%，精确率 0.83，MRR 0.97，多样性 1.43
 - MMR + 去重：召回率 100%，精确率 0.77，MRR 0.97，多样性 1.57
-- **混合检索：召回率 100%，精确率 0.89，MRR 0.98，多样性 1.33**（相关性指标最优）
+- **混合检索（降级 1.0）：召回率 96.7%，精确率 0.86，MRR 0.94，多样性 1.30**
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
-- 降级阈值：MAX_DISTANCE=1.1
+- 降级阈值：MAX_DISTANCE=1.0（标定得出，P=0.967, R=0.967）
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，容器重建不丢）
 - checkpoints 持久化：`./data/checkpoints.db`（volume 挂载）
@@ -1545,8 +1618,9 @@ torch
 - requirements.txt：18 个包 + 顶部 2 行（CPU 索引），已在干净 venv 里验证可导入
 - 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用同一份 `hybrid_search`）
 - 评估可复现：`python eval/eval_retrieval.py` 一条命令输出所有指标 + 84.1% 随机基线
+- 阈值标定：`python eval/calibrate_distance.py` 输出正负样本距离分布 + PR 曲线
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ---
 
-**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通且评估可复现**，可进入面试冲刺阶段。
+**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通、评估可复现、阈值有实验支撑**，可进入面试冲刺阶段。
