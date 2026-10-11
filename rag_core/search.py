@@ -6,6 +6,8 @@
 - build_bm25: 构建 BM25 索引
 - hybrid_search: 混合检索（向量 + BM25 + 加权 RRF），含距离阈值降级
 - diverse_by_source: MMR + 按 source 去重
+- rerank: 用 bge-reranker-base 精排（CrossEncoder）
+- hybrid_search_with_rerank: 混合检索召回 + Rerank 精排的完整 pipeline
 """
 import os
 import sys
@@ -40,6 +42,9 @@ MAX_DISTANCE = 1.0
 # 默认模型和索引位置
 DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_INDEX_DIR = Path(__file__).resolve().parent.parent / "faiss_index"
+
+# Rerank 模型
+RERANKER_MODEL = "BAAI/bge-reranker-base"
 
 
 class LocalEmbeddings(Embeddings):
@@ -151,3 +156,99 @@ def diverse_by_source(query, vectorstore, k: int = 3):
             if len(out) == k:
                 break
     return out
+
+
+# ============================================================
+# Rerank（精排）
+# ============================================================
+
+# 懒加载：第一次调用 rerank 时才加载 3 GB 模型，避免 import 时拖慢启动
+_reranker = None
+
+
+def _get_reranker():
+    """懒加载 CrossEncoder。第一次调用时加载，之后复用。"""
+    global _reranker
+    if _reranker is None:
+        from sentence_transformers import CrossEncoder
+        print(f"[Reranker] 加载 {RERANKER_MODEL}...", file=sys.stderr)
+        _reranker = CrossEncoder(RERANKER_MODEL, max_length=512)
+        print(f"[Reranker] 加载完成", file=sys.stderr)
+    return _reranker
+
+
+def rerank(query: str, docs: list, top_k: int = 3, verbose: bool = False) -> list:
+    """
+    用 bge-reranker-base 对候选 docs 精排，返回 top_k。
+
+    bge-reranker 是 CrossEncoder（交叉编码器），输入 (query, doc) 对，
+    输出相关性分数。比双塔 embedding 更准，但更慢，所以只用于精排 Top-K。
+
+    参数：
+        query: 用户问题
+        docs: 混合检索召回的候选文档列表（建议 20 条左右）
+        top_k: 精排后保留几条
+        verbose: 是否打印分数到 stderr（服务端调试用）
+
+    返回：
+        按 reranker 分数从高到低排序的 top_k 个文档
+    """
+    if not docs:
+        return []
+
+    reranker = _get_reranker()
+    # CrossEncoder 输入格式：[(query, doc_content), ...]
+    pairs = [(query, doc.page_content) for doc in docs]
+    scores = reranker.predict(pairs)
+
+    # 按分数降序排序，取 top_k
+    ranked = sorted(zip(docs, scores), key=lambda x: float(x[1]), reverse=True)
+
+    if verbose:
+        print(f"[Rerank] 候选 {len(docs)} 条 → Top-{top_k}", file=sys.stderr)
+        for i, (doc, score) in enumerate(ranked[:top_k], 1):
+            src = doc.metadata.get("source", "?")
+            print(f"  [{i}] score={float(score):.4f} source={src}", file=sys.stderr)
+
+    return [doc for doc, _ in ranked[:top_k]]
+
+
+def hybrid_search_with_rerank(
+    query,
+    vectorstore,
+    bm25,
+    all_docs,
+    recall_k: int = 20,
+    final_k: int = 3,
+    verbose: bool = False,
+    **hybrid_kwargs,
+) -> list:
+    """
+    混合检索 + Rerank 的完整 pipeline（两阶段检索）。
+
+    流程：
+        1. hybrid_search 粗排召回 recall_k 条（默认 20）
+        2. rerank 精排到 final_k 条（默认 3）
+
+    参数：
+        recall_k: 粗排阶段保留多少条（建议 20）
+        final_k: 精排后返回多少条（默认 3）
+        verbose: 是否打印中间过程到 stderr
+        **hybrid_kwargs: 传给 hybrid_search 的其他参数（rrf_k、权重等）
+    """
+    # 1. 粗排：混合检索召回
+    candidates = hybrid_search(
+        query,
+        vectorstore=vectorstore,
+        bm25=bm25,
+        all_docs=all_docs,
+        k=recall_k,
+        verbose=verbose,
+        **hybrid_kwargs,
+    )
+
+    if not candidates:
+        return []
+
+    # 2. 精排：Reranker 打分
+    return rerank(query, candidates, top_k=final_k, verbose=verbose)

@@ -15,6 +15,7 @@ from rag_core.search import (
     load_vectorstore,
     build_bm25,
     hybrid_search,
+    hybrid_search_with_rerank,
     DEFAULT_MODEL,
     DEFAULT_INDEX_DIR,
 )
@@ -67,12 +68,14 @@ mcp = FastMCP("RAG Knowledge Server")
 @mcp.tool
 def search_knowledge(query: str) -> str:
     """从知识库中检索与问题相关的信息，返回最相关的文档片段。"""
-    results = hybrid_search(
+    # 两阶段检索：混合检索召回 Top-20 → Reranker 精排 Top-3
+    results = hybrid_search_with_rerank(
         query,
         vectorstore=vectorstore,
         bm25=bm25,
         all_docs=all_docs,
-        k=3,
+        recall_k=20,
+        final_k=3,
         verbose=True,
     )
 

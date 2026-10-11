@@ -7,10 +7,12 @@ RAG 检索策略评估脚本
 
 输出：
 - 随机基线（组合公式精确计算）
-- 4 种策略的 4 指标对比（召回率 / 精确率 / MRR / 多样性）
+- 5 种策略的 4 指标对比（召回率 / 精确率 / MRR / 多样性）
 - 汇总表
 
-注：所有检索函数从 rag_core.search 导入，保证评估跑的就是服务端部署的代码。
+注：
+- 所有检索函数从 rag_core.search 导入，保证评估跑的就是服务端部署的代码
+- "混合检索 + Rerank"策略第一次跑会加载 bge-reranker-base（约 10~20 秒）
 """
 import os
 import sys
@@ -28,6 +30,7 @@ from rag_core.search import (
     load_vectorstore,
     build_bm25,
     hybrid_search,
+    hybrid_search_with_rerank,
     diverse_by_source,
     LocalEmbeddings,
     DEFAULT_MODEL,
@@ -53,8 +56,6 @@ def random_baseline(test_set, all_docs, k=3):
 
     用组合公式精确计算，不用模拟：
         P(至少命中一个期望 source) = 1 - C(N - n_expected, k) / C(N, k)
-
-    其中 N = 总 chunk 数，n_expected = 期望 source 的 chunk 数。
     """
     n_total = len(all_docs)
     source_counts = Counter(doc.metadata["source"] for doc in all_docs)
@@ -70,7 +71,7 @@ def random_baseline(test_set, all_docs, k=3):
     return total / len(test_set)
 
 
-# ===== 四种检索策略（都用公共实现）=====
+# ===== 5 种检索策略（都用公共实现）=====
 def search_similarity(q, k):
     return vectorstore.similarity_search(q, k=k)
 
@@ -82,6 +83,18 @@ def search_diverse(q, k):
 
 def search_hybrid(q, k):
     return hybrid_search(q, vectorstore, bm25, all_docs, k=k, verbose=False)
+
+def search_hybrid_rerank(q, k):
+    """两阶段检索：混合检索召回 Top-20 → Reranker 精排 Top-k"""
+    return hybrid_search_with_rerank(
+        q,
+        vectorstore=vectorstore,
+        bm25=bm25,
+        all_docs=all_docs,
+        recall_k=20,
+        final_k=k,
+        verbose=False,
+    )
 
 
 # ===== 四指标评估 =====
@@ -96,22 +109,22 @@ def evaluate_full(search_fn, name, k=3):
         sources = [doc.metadata["source"] for doc in results]
         unique_sources = set(sources)
 
-        # 召回率：期望文档有没有出现
+        # 召回率
         if any(exp in sources for exp in item["expected_sources"]):
             hit += 1
 
-        # 精确率：Top-k 里有多少是期望文档
+        # 精确率
         if sources:
             relevant = sum(1 for s in sources if s in item["expected_sources"])
             precision_sum += relevant / len(sources)
 
-        # MRR：第一个正确结果的排名倒数
+        # MRR
         for rank, s in enumerate(sources, 1):
             if s in item["expected_sources"]:
                 mrr_sum += 1 / rank
                 break
 
-        # 多样性：Top-k 里不同 source 数
+        # 多样性
         diversity_sum += len(unique_sources)
 
     n = len(test_set)
@@ -137,32 +150,29 @@ strategies = [
     ("MMR", search_mmr),
     ("MMR + 按来源去重", search_diverse),
     ("混合检索（向量+BM25+RRF）", search_hybrid),
+    ("混合检索 + Rerank", search_hybrid_rerank),
 ]
 
 results = []
 for name, fn in strategies:
+    print(f"跑 [{name}]...", end=" ", flush=True)
     r = evaluate_full(fn, name, k=3)
     results.append((name, r))
-    print(f"[{name}]")
-    print(f"  召回率：{r['recall']:.1%}")
-    print(f"  精确率：{r['precision']:.2f}")
-    print(f"  MRR：   {r['mrr']:.2f}")
-    print(f"  多样性：{r['diversity']:.2f}")
-    print()
+    print(f"召回率 {r['recall']:.1%}")
 
-# ===== 汇总表 =====
+print()
 print("=" * 70)
 print("汇总表")
 print("=" * 70)
-print(f"{'策略':<30} {'召回率':>8} {'精确率':>8} {'MRR':>8} {'多样性':>8}")
+print(f"{'策略':<32} {'召回率':>8} {'精确率':>8} {'MRR':>8} {'多样性':>8}")
 print("-" * 70)
 for name, r in results:
     print(
-        f"{name:<30} "
+        f"{name:<32} "
         f"{r['recall']:>7.1%} "
         f"{r['precision']:>8.2f} "
         f"{r['mrr']:>8.2f} "
         f"{r['diversity']:>8.2f}"
     )
 print("-" * 70)
-print(f"{'随机基线':<30} {baseline:>7.1%}")
+print(f"{'随机基线':<32} {baseline:>7.1%}")
