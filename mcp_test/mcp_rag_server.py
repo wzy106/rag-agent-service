@@ -39,9 +39,14 @@ if DEFAULT_INDEX_DIR.exists():
 else:
     docs_dir = _PROJECT_ROOT / "docs"
     documents = []
-    for md_file in docs_dir.glob("*.md"):
+    # rglob 递归扫描所有子目录（docs/langchain/, docs/notes/, docs/readme/, docs/stories/）
+    for md_file in docs_dir.rglob("*.md"):
         text = md_file.read_text(encoding="utf-8")
-        documents.append(Document(page_content=text, metadata={"source": md_file.name}))
+        # 用相对路径作为 source，避免不同子目录同名文件冲突
+        # 例如 "langchain/01_一tool_装饰器.md"、"stories/22_故事_21Docker_构建报.md"
+        rel_path = md_file.relative_to(docs_dir).as_posix()
+        documents.append(Document(page_content=text, metadata={"source": rel_path}))
+    print(f"[RAG Server] 扫描到 {len(documents)} 个 markdown 文件", file=sys.stderr)
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=300,
