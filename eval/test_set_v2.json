@@ -1,0 +1,1496 @@
+[
+  {
+    "question": "模型是怎么知道该调用哪个工具的？",
+    "expected_sources": [
+      "langchain/01_一tool_装饰器.md"
+    ]
+  },
+  {
+    "question": "给模型发工具信息时具体会包含哪些内容？",
+    "expected_sources": [
+      "langchain/01_一tool_装饰器.md"
+    ]
+  },
+  {
+    "question": "写工具函数时加不加那个装饰器有啥区别？",
+    "expected_sources": [
+      "langchain/01_一tool_装饰器.md"
+    ]
+  },
+  {
+    "question": "create_agent 的 checkpointer 参数是干嘛用的？",
+    "expected_sources": [
+      "langchain/02_二create_agent_的参数.md"
+    ]
+  },
+  {
+    "question": "不传 checkpointer 的话智能体还能记住之前聊过什么吗？",
+    "expected_sources": [
+      "langchain/02_二create_agent_的参数.md"
+    ]
+  },
+  {
+    "question": "create_agent 内部是怎么一步步跑起来的？",
+    "expected_sources": [
+      "langchain/02_二create_agent_的参数.md"
+    ]
+  },
+  {
+    "question": "LangGraph里config这个字典该怎么写才对？",
+    "expected_sources": [
+      "langchain/03_三config_和_thread_id.md"
+    ]
+  },
+  {
+    "question": "thread_id到底是拿来干嘛用的？",
+    "expected_sources": [
+      "langchain/03_三config_和_thread_id.md"
+    ]
+  },
+  {
+    "question": "不同用户的聊天记录在内存里是怎么分开存的？",
+    "expected_sources": [
+      "langchain/03_三config_和_thread_id.md"
+    ]
+  },
+  {
+    "question": "流式输出里每个 chunk 长什么样？",
+    "expected_sources": [
+      "langchain/04_四stream_返回的_chunk_结构.md"
+    ]
+  },
+  {
+    "question": "怎么从 chunk 里安全地取出消息列表？",
+    "expected_sources": [
+      "langchain/04_四stream_返回的_chunk_结构.md"
+    ]
+  },
+  {
+    "question": "遍历 chunk 时怎么同时拿到节点名和数据？",
+    "expected_sources": [
+      "langchain/04_四stream_返回的_chunk_结构.md"
+    ]
+  },
+  {
+    "question": "那个竖线符号在代码里到底啥意思？",
+    "expected_sources": [
+      "langchain/05_五prompt_model_parser_管道语法.md"
+    ]
+  },
+  {
+    "question": "这串东西从提问到出结果中间经历了哪些步骤？",
+    "expected_sources": [
+      "langchain/05_五prompt_model_parser_管道语法.md"
+    ]
+  },
+  {
+    "question": "怎么用一行代码把提示词、模型和解析器串起来？",
+    "expected_sources": [
+      "langchain/05_五prompt_model_parser_管道语法.md"
+    ]
+  },
+  {
+    "question": "为什么这里要自己拼提示词，而不是用 with_structured_output？",
+    "expected_sources": [
+      "langchain/06_六PydanticOutputParser_结构化输出.md"
+    ]
+  },
+  {
+    "question": "这个解析器是怎么把模型返回的内容变成 Pydantic 对象的？",
+    "expected_sources": [
+      "langchain/06_六PydanticOutputParser_结构化输出.md"
+    ]
+  },
+  {
+    "question": "代码里那个 partial 注入格式说明是起什么作用的？",
+    "expected_sources": [
+      "langchain/06_六PydanticOutputParser_结构化输出.md"
+    ]
+  },
+  {
+    "question": "InMemorySaver 把数据存在哪里？",
+    "expected_sources": [
+      "langchain/07_七InMemorySaver_记忆机制.md"
+    ]
+  },
+  {
+    "question": "开发时用啥保存器比较合适？",
+    "expected_sources": [
+      "langchain/07_七InMemorySaver_记忆机制.md"
+    ]
+  },
+  {
+    "question": "thread_id 是干嘛用的？",
+    "expected_sources": [
+      "langchain/07_七InMemorySaver_记忆机制.md"
+    ]
+  },
+  {
+    "question": "怎么让AI说话像个甜妹？",
+    "expected_sources": [
+      "langchain/08_八System_Prompt_人设控制.md"
+    ]
+  },
+  {
+    "question": "system_prompt到底能管住模型哪些方面？",
+    "expected_sources": [
+      "langchain/08_八System_Prompt_人设控制.md"
+    ]
+  },
+  {
+    "question": "模型不按人设回答该怎么办？",
+    "expected_sources": [
+      "langchain/08_八System_Prompt_人设控制.md"
+    ]
+  },
+  {
+    "question": "怎么判断模型是不是要调用工具了？",
+    "expected_sources": [
+      "langchain/09_九tool_calls_属性.md"
+    ]
+  },
+  {
+    "question": "tool_calls 里的每个元素都包含哪些字段？",
+    "expected_sources": [
+      "langchain/09_九tool_calls_属性.md"
+    ]
+  },
+  {
+    "question": "模型调用工具时返回的消息内容为啥是空的？",
+    "expected_sources": [
+      "langchain/09_九tool_calls_属性.md"
+    ]
+  },
+  {
+    "question": "DeepSeek 报这个格式不支持，我该怎么改？",
+    "expected_sources": [
+      "langchain/11_十一常见错误对照表.md"
+    ]
+  },
+  {
+    "question": "为什么我写的工具模型一直不调用？",
+    "expected_sources": [
+      "langchain/11_十一常见错误对照表.md"
+    ]
+  },
+  {
+    "question": "代码里 result 没定义是咋回事？",
+    "expected_sources": [
+      "langchain/11_十一常见错误对照表.md"
+    ]
+  },
+  {
+    "question": "对话状态存在哪才不怕重启丢失？",
+    "expected_sources": [
+      "notes/02_二架构图.md"
+    ]
+  },
+  {
+    "question": "为什么后来把Redis缓存去掉了？",
+    "expected_sources": [
+      "notes/02_二架构图.md"
+    ]
+  },
+  {
+    "question": "模型判断要调工具后接下来怎么走？",
+    "expected_sources": [
+      "notes/02_二架构图.md"
+    ]
+  },
+  {
+    "question": "这个系统里负责编排 Agent 的是啥框架？",
+    "expected_sources": [
+      "notes/03_三技术栈.md"
+    ]
+  },
+  {
+    "question": "检索环节用了哪些技术来提升准确率？",
+    "expected_sources": [
+      "notes/03_三技术栈.md"
+    ]
+  },
+  {
+    "question": "部署上线是怎么打包和运行的？",
+    "expected_sources": [
+      "notes/03_三技术栈.md"
+    ]
+  },
+  {
+    "question": "你们的记忆功能重启后还能保留吗？",
+    "expected_sources": [
+      "notes/04_四核心功能.md"
+    ]
+  },
+  {
+    "question": "检索结果是怎么一步步筛选出来的？",
+    "expected_sources": [
+      "notes/04_四核心功能.md"
+    ]
+  },
+  {
+    "question": "Agent 跑飞了有什么保护机制？",
+    "expected_sources": [
+      "notes/04_四核心功能.md"
+    ]
+  },
+  {
+    "question": "知识库搜不到东西会返回啥？",
+    "expected_sources": [
+      "notes/05_五RAG_完整链路面试重点.md"
+    ]
+  },
+  {
+    "question": "怎么判断检索结果靠不靠谱？",
+    "expected_sources": [
+      "notes/05_五RAG_完整链路面试重点.md"
+    ]
+  },
+  {
+    "question": "为什么宁可漏答也不让模型瞎编？",
+    "expected_sources": [
+      "notes/05_五RAG_完整链路面试重点.md"
+    ]
+  },
+  {
+    "question": "怎么防止报错信息把密钥泄露给用户？",
+    "expected_sources": [
+      "notes/06_六遇到的坑面试重点.md"
+    ]
+  },
+  {
+    "question": "Docker 镜像解压失败说文件损坏是怎么回事？",
+    "expected_sources": [
+      "notes/06_六遇到的坑面试重点.md"
+    ]
+  },
+  {
+    "question": "流式接口断开后为什么会报 GeneratorExit？",
+    "expected_sources": [
+      "notes/06_六遇到的坑面试重点.md"
+    ]
+  },
+  {
+    "question": "这套系统是怎么先粗筛再精排的？",
+    "expected_sources": [
+      "notes/08_八项目数据面试时能报的具体数字.md"
+    ]
+  },
+  {
+    "question": "对话历史重启之后还会保留吗？",
+    "expected_sources": [
+      "notes/08_八项目数据面试时能报的具体数字.md"
+    ]
+  },
+  {
+    "question": "换成CPU之后打包要多久？",
+    "expected_sources": [
+      "notes/08_八项目数据面试时能报的具体数字.md"
+    ]
+  },
+  {
+    "question": "怎么用浏览器看回复一个字一个字打出来的效果？",
+    "expected_sources": [
+      "notes/09_九可演示的操作.md"
+    ]
+  },
+  {
+    "question": "怎么证明这个系统的检索评估结果是可复现的？",
+    "expected_sources": [
+      "notes/09_九可演示的操作.md"
+    ]
+  },
+  {
+    "question": "容器完全销毁重建后，它还能记住之前聊过的内容吗？",
+    "expected_sources": [
+      "notes/09_九可演示的操作.md"
+    ]
+  },
+  {
+    "question": "为什么选 bge-reranker-base 这个模型？",
+    "expected_sources": [
+      "notes/10_十RAG_延伸知识点面试加分.md"
+    ]
+  },
+  {
+    "question": "向量检索和重排序有什么区别？",
+    "expected_sources": [
+      "notes/10_十RAG_延伸知识点面试加分.md"
+    ]
+  },
+  {
+    "question": "怎么判断检索出来的结果好不好？",
+    "expected_sources": [
+      "notes/10_十RAG_延伸知识点面试加分.md"
+    ]
+  },
+  {
+    "question": "为什么项目里还留着 Redis 的依赖没删掉？",
+    "expected_sources": [
+      "notes/11_十一MySQL_展示层_Redis_预留工程化.md"
+    ]
+  },
+  {
+    "question": "现在系统里 MySQL 到底负责哪些功能？",
+    "expected_sources": [
+      "notes/11_十一MySQL_展示层_Redis_预留工程化.md"
+    ]
+  },
+  {
+    "question": "Agent 的记忆和对话历史分别存在哪里？",
+    "expected_sources": [
+      "notes/11_十一MySQL_展示层_Redis_预留工程化.md"
+    ]
+  },
+  {
+    "question": "流式输出时怎么把工具调用的中间结果跳过？",
+    "expected_sources": [
+      "notes/12_十二FastAPI_服务层设计面试重点.md"
+    ]
+  },
+  {
+    "question": "数据库连接配置为什么都用环境变量加默认值？",
+    "expected_sources": [
+      "notes/12_十二FastAPI_服务层设计面试重点.md"
+    ]
+  },
+  {
+    "question": "怎么保证输出给前端的数据是SSE格式？",
+    "expected_sources": [
+      "notes/12_十二FastAPI_服务层设计面试重点.md"
+    ]
+  },
+  {
+    "question": "Docker 镜像体积怎么从 3.5G 压到 2.4G 的？",
+    "expected_sources": [
+      "notes/13_十三RAG_评估面试重点.md"
+    ]
+  },
+  {
+    "question": "模型文件用 volume 挂载后重建容器还会重新下载吗？",
+    "expected_sources": [
+      "notes/13_十三RAG_评估面试重点.md"
+    ]
+  },
+  {
+    "question": "MMR 在检索时牺牲了多少召回换多样性？",
+    "expected_sources": [
+      "notes/13_十三RAG_评估面试重点.md"
+    ]
+  },
+  {
+    "question": "怎么根据测试结果确定距离阈值该设多少？",
+    "expected_sources": [
+      "notes/14_十四Docker_部署完整方案面试重点.md"
+    ]
+  },
+  {
+    "question": "调整阈值后系统的幻觉率有改善吗？",
+    "expected_sources": [
+      "notes/14_十四Docker_部署完整方案面试重点.md"
+    ]
+  },
+  {
+    "question": "部署时怎么让模型走国内镜像并且离线加载？",
+    "expected_sources": [
+      "notes/14_十四Docker_部署完整方案面试重点.md"
+    ]
+  },
+  {
+    "question": "模型缓存和checkpoints目录为啥不提交到git？",
+    "expected_sources": [
+      "notes/15_十五项目新增数据更新.md"
+    ]
+  },
+  {
+    "question": "加了精排之后检索效果提升了多少？",
+    "expected_sources": [
+      "notes/15_十五项目新增数据更新.md"
+    ]
+  },
+  {
+    "question": "MAX_DISTANCE阈值调整前后幻觉率有啥变化？",
+    "expected_sources": [
+      "notes/15_十五项目新增数据更新.md"
+    ]
+  },
+  {
+    "question": "评估脚本跑一次能直接看到哪些指标？",
+    "expected_sources": [
+      "notes/16_十六项目数据汇总最新.md"
+    ]
+  },
+  {
+    "question": "为什么项目里把 Redis 删了又保留依赖？",
+    "expected_sources": [
+      "notes/16_十六项目数据汇总最新.md"
+    ]
+  },
+  {
+    "question": "混合检索加重排后精确率和多样性变化大吗？",
+    "expected_sources": [
+      "notes/16_十六项目数据汇总最新.md"
+    ]
+  },
+  {
+    "question": "RAG 从文档到回答一般要经过哪些步骤？",
+    "expected_sources": [
+      "notes_interview/q02_RAG_的完整流程.md"
+    ]
+  },
+  {
+    "question": "用户提问后是怎么找到最相关的内容的？",
+    "expected_sources": [
+      "notes_interview/q02_RAG_的完整流程.md"
+    ]
+  },
+  {
+    "question": "如果检索到的内容不太靠谱会怎么处理？",
+    "expected_sources": [
+      "notes_interview/q02_RAG_的完整流程.md"
+    ]
+  },
+  {
+    "question": "装PyTorch时怎么避免下载一堆用不上的GPU组件？",
+    "expected_sources": [
+      "notes_interview/q06_为什么要用_Docker.md"
+    ]
+  },
+  {
+    "question": "小模型跑在CPU上够快的话还有必要装CUDA版吗？",
+    "expected_sources": [
+      "notes_interview/q06_为什么要用_Docker.md"
+    ]
+  },
+  {
+    "question": "Docker镜像瘦身时怎么把编译工具从最终镜像里去掉？",
+    "expected_sources": [
+      "notes_interview/q06_为什么要用_Docker.md"
+    ]
+  },
+  {
+    "question": "混合检索是怎么把两种搜索方式结合起来的？",
+    "expected_sources": [
+      "notes_interview/q10_混合检索是什么.md"
+    ]
+  },
+  {
+    "question": "RRF 合并结果时为什么会让某些文档排名更高？",
+    "expected_sources": [
+      "notes_interview/q10_混合检索是什么.md"
+    ]
+  },
+  {
+    "question": "只用向量搜索不够用，问题出在哪儿？",
+    "expected_sources": [
+      "notes_interview/q10_混合检索是什么.md"
+    ]
+  },
+  {
+    "question": "怎么避免Agent一直重复执行停不下来？",
+    "expected_sources": [
+      "notes_interview/q11_怎么防止_Agent_死循环.md"
+    ]
+  },
+  {
+    "question": "Agent循环次数超了以后服务会不会直接挂掉？",
+    "expected_sources": [
+      "notes_interview/q11_怎么防止_Agent_死循环.md"
+    ]
+  },
+  {
+    "question": "面试被问到Agent安全防护该怎么回答？",
+    "expected_sources": [
+      "notes_interview/q11_怎么防止_Agent_死循环.md"
+    ]
+  },
+  {
+    "question": "对话历史存在哪里才不会出乱子？",
+    "expected_sources": [
+      "notes_interview/q12_Agent_多轮对话怎么实现.md"
+    ]
+  },
+  {
+    "question": "生产环境数据库要怎么切换？",
+    "expected_sources": [
+      "notes_interview/q12_Agent_多轮对话怎么实现.md"
+    ]
+  },
+  {
+    "question": "启动时怎么保证数据目录存在？",
+    "expected_sources": [
+      "notes_interview/q12_Agent_多轮对话怎么实现.md"
+    ]
+  },
+  {
+    "question": "检索不到东西时系统是怎么处理的？",
+    "expected_sources": [
+      "notes_interview/q13_检索不到内容怎么处理.md"
+    ]
+  },
+  {
+    "question": "那个距离阈值1.0是怎么定出来的？",
+    "expected_sources": [
+      "notes_interview/q13_检索不到内容怎么处理.md"
+    ]
+  },
+  {
+    "question": "为什么没检索到内容就不调大模型了？",
+    "expected_sources": [
+      "notes_interview/q13_检索不到内容怎么处理.md"
+    ]
+  },
+  {
+    "question": "怎么判断RAG检索结果覆盖了多少不同来源？",
+    "expected_sources": [
+      "notes_interview/q14_RAG_评估用什么指标.md"
+    ]
+  },
+  {
+    "question": "第一个正确结果排得太靠后该看哪个指标？",
+    "expected_sources": [
+      "notes_interview/q14_RAG_评估用什么指标.md"
+    ]
+  },
+  {
+    "question": "随机抽样的命中概率是怎么算出来的？",
+    "expected_sources": [
+      "notes_interview/q14_RAG_评估用什么指标.md"
+    ]
+  },
+  {
+    "question": "模型服务报错时，前端会显示哪些提示？",
+    "expected_sources": [
+      "notes_interview/q15_错误信息怎么处理.md"
+    ]
+  },
+  {
+    "question": "为什么生产环境不能把原始异常直接返回给用户？",
+    "expected_sources": [
+      "notes_interview/q15_错误信息怎么处理.md"
+    ]
+  },
+  {
+    "question": "代码里是怎么判断该给用户哪种错误提示的？",
+    "expected_sources": [
+      "notes_interview/q15_错误信息怎么处理.md"
+    ]
+  },
+  {
+    "question": "Docker 构建报错怎么判断是编译问题还是写盘问题？",
+    "expected_sources": [
+      "notes_interview/q17_Docker_构建失败怎么排查.md"
+    ]
+  },
+  {
+    "question": "C 盘满了会导致 Docker 构建出现什么错误？",
+    "expected_sources": [
+      "notes_interview/q17_Docker_构建失败怎么排查.md"
+    ]
+  },
+  {
+    "question": "怎么查看 Docker 在 Windows 上占用了多少磁盘空间？",
+    "expected_sources": [
+      "notes_interview/q17_Docker_构建失败怎么排查.md"
+    ]
+  },
+  {
+    "question": "为什么我改了 Dockerfile 后 pip 装东西就老是断？",
+    "expected_sources": [
+      "notes_interview/q18_为什么_pip_突然开始超时.md"
+    ]
+  },
+  {
+    "question": "装 torch 的时候怎么才能少下点东西、别老超时？",
+    "expected_sources": [
+      "notes_interview/q18_为什么_pip_突然开始超时.md"
+    ]
+  },
+  {
+    "question": "除了换源和加超时参数，有没有更彻底的解决办法？",
+    "expected_sources": [
+      "notes_interview/q18_为什么_pip_突然开始超时.md"
+    ]
+  },
+  {
+    "question": "怎么判断下载的 wheel 包能不能在 Linux 容器里跑？",
+    "expected_sources": [
+      "notes_interview/q19_Windows_下载的_wheel_能给_Linux_容器用吗.md"
+    ]
+  },
+  {
+    "question": "Windows 上 pip 下载的包为什么放到容器里就装不上？",
+    "expected_sources": [
+      "notes_interview/q19_Windows_下载的_wheel_能给_Linux_容器用吗.md"
+    ]
+  },
+  {
+    "question": "给容器准备安装包时怎么指定正确的平台和 Python 版本？",
+    "expected_sources": [
+      "notes_interview/q19_Windows_下载的_wheel_能给_Linux_容器用吗.md"
+    ]
+  },
+  {
+    "question": "用多阶段构建能帮镜像瘦身多少？",
+    "expected_sources": [
+      "notes_interview/q20_多阶段构建的好处是什么.md"
+    ]
+  },
+  {
+    "question": "为什么生产镜像里最好不要留编译器？",
+    "expected_sources": [
+      "notes_interview/q20_多阶段构建的好处是什么.md"
+    ]
+  },
+  {
+    "question": "多阶段构建会拖慢哪些环节？",
+    "expected_sources": [
+      "notes_interview/q20_多阶段构建的好处是什么.md"
+    ]
+  },
+  {
+    "question": "容器重启后对话记录怎么才不会丢？",
+    "expected_sources": [
+      "notes_interview/q21_Docker_容器重建后LangGraph_的记忆会丢吗.md"
+    ]
+  },
+  {
+    "question": "数据目录的路径是怎么定的？",
+    "expected_sources": [
+      "notes_interview/q21_Docker_容器重建后LangGraph_的记忆会丢吗.md"
+    ]
+  },
+  {
+    "question": "怎么验证持久化配置真的生效了？",
+    "expected_sources": [
+      "notes_interview/q21_Docker_容器重建后LangGraph_的记忆会丢吗.md"
+    ]
+  },
+  {
+    "question": "为什么不能只靠环境变量来定位模型缓存目录？",
+    "expected_sources": [
+      "notes_interview/q22_为什么要让_HF_HOME_三级探测.md"
+    ]
+  },
+  {
+    "question": "容器里启动时找不到 snapshots 目录是什么原因？",
+    "expected_sources": [
+      "notes_interview/q22_为什么要让_HF_HOME_三级探测.md"
+    ]
+  },
+  {
+    "question": "怎么让代码在本地和容器里都能找到缓存路径？",
+    "expected_sources": [
+      "notes_interview/q22_为什么要让_HF_HOME_三级探测.md"
+    ]
+  },
+  {
+    "question": "把检索逻辑抽出来共用有什么好处？",
+    "expected_sources": [
+      "notes_interview/q23_为什么要抽公共_hybrid_search_模块.md"
+    ]
+  },
+  {
+    "question": "改了检索参数后怎么保证评估和线上一致？",
+    "expected_sources": [
+      "notes_interview/q23_为什么要抽公共_hybrid_search_模块.md"
+    ]
+  },
+  {
+    "question": "脚本在子目录里导不到项目根模块怎么办？",
+    "expected_sources": [
+      "notes_interview/q23_为什么要抽公共_hybrid_search_模块.md"
+    ]
+  },
+  {
+    "question": "为什么最后没用F1最高的那个阈值？",
+    "expected_sources": [
+      "notes_interview/q24_MAX_DISTANCE_阈值怎么定的.md"
+    ]
+  },
+  {
+    "question": "正负样本的距离分布重叠多不多？",
+    "expected_sources": [
+      "notes_interview/q24_MAX_DISTANCE_阈值怎么定的.md"
+    ]
+  },
+  {
+    "question": "这个阈值是怎么通过数据标定出来的？",
+    "expected_sources": [
+      "notes_interview/q24_MAX_DISTANCE_阈值怎么定的.md"
+    ]
+  },
+  {
+    "question": "双塔和交叉编码器在检索流程里各自负责什么？",
+    "expected_sources": [
+      "notes_interview/q25_为什么要加_Rerank2026-10-11_新增.md"
+    ]
+  },
+  {
+    "question": "为什么加了重排序之后召回率一点没变？",
+    "expected_sources": [
+      "notes_interview/q25_为什么要加_Rerank2026-10-11_新增.md"
+    ]
+  },
+  {
+    "question": "两阶段检索怎么保证又快又准？",
+    "expected_sources": [
+      "notes_interview/q25_为什么要加_Rerank2026-10-11_新增.md"
+    ]
+  },
+  {
+    "question": "用户请求是怎么一步步传到RAG检索模块的？",
+    "expected_sources": [
+      "readme/01_架构.md"
+    ]
+  },
+  {
+    "question": "混合检索具体是怎么把向量和BM25的结果合到一起的？",
+    "expected_sources": [
+      "readme/01_架构.md"
+    ]
+  },
+  {
+    "question": "什么情况下系统会跳过正常的检索流程？",
+    "expected_sources": [
+      "readme/01_架构.md"
+    ]
+  },
+  {
+    "question": "服务重启之后聊天记录还能保留吗？",
+    "expected_sources": [
+      "readme/02_核心功能.md"
+    ]
+  },
+  {
+    "question": "怎么防止智能体陷入无限循环或者烧太多token？",
+    "expected_sources": [
+      "readme/02_核心功能.md"
+    ]
+  },
+  {
+    "question": "检索结果太多时怎么保证最后给出的内容更准？",
+    "expected_sources": [
+      "readme/02_核心功能.md"
+    ]
+  },
+  {
+    "question": "项目里哪个目录是核心服务代码？",
+    "expected_sources": [
+      "readme/03_目录结构.md"
+    ]
+  },
+  {
+    "question": "RAG 评估相关的东西都放在哪？",
+    "expected_sources": [
+      "readme/03_目录结构.md"
+    ]
+  },
+  {
+    "question": "哪些文件夹用了 volume 挂载？",
+    "expected_sources": [
+      "readme/03_目录结构.md"
+    ]
+  },
+  {
+    "question": "怎么把 bge 那两个模型提前下载到本地缓存？",
+    "expected_sources": [
+      "readme/04_启动.md"
+    ]
+  },
+  {
+    "question": "第一次启动和之后启动命令有啥区别？",
+    "expected_sources": [
+      "readme/04_启动.md"
+    ]
+  },
+  {
+    "question": "Windows 上 Docker 怎么避免把 C 盘撑满？",
+    "expected_sources": [
+      "readme/04_启动.md"
+    ]
+  },
+  {
+    "question": "怎么让服务记住上一轮聊的内容？",
+    "expected_sources": [
+      "readme/05_接口.md"
+    ]
+  },
+  {
+    "question": "重启后之前的对话上下文还能保留吗？",
+    "expected_sources": [
+      "readme/05_接口.md"
+    ]
+  },
+  {
+    "question": "有没有接口能一边生成回答一边返回结果？",
+    "expected_sources": [
+      "readme/05_接口.md"
+    ]
+  },
+  {
+    "question": "在容器里连 MySQL 该填什么地址？",
+    "expected_sources": [
+      "readme/06_环境变量.md"
+    ]
+  },
+  {
+    "question": "怎么让模型走国内镜像下载？",
+    "expected_sources": [
+      "readme/06_环境变量.md"
+    ]
+  },
+  {
+    "question": "Docker 跑的时候要额外配哪些环境变量？",
+    "expected_sources": [
+      "readme/06_环境变量.md"
+    ]
+  },
+  {
+    "question": "哪种检索方式查得最准？",
+    "expected_sources": [
+      "readme/07_RAG_评估.md"
+    ]
+  },
+  {
+    "question": "加了重排序后效果提升在哪？",
+    "expected_sources": [
+      "readme/07_RAG_评估.md"
+    ]
+  },
+  {
+    "question": "为什么重排序没改善召回率？",
+    "expected_sources": [
+      "readme/07_RAG_评估.md"
+    ]
+  },
+  {
+    "question": "为什么最后选了1.00这个阈值？",
+    "expected_sources": [
+      "readme/08_阈值标定.md"
+    ]
+  },
+  {
+    "question": "阈值调到1.00后漏答和编造各占多少？",
+    "expected_sources": [
+      "readme/08_阈值标定.md"
+    ]
+  },
+  {
+    "question": "怎么重新跑出这个阈值调优的结果？",
+    "expected_sources": [
+      "readme/08_阈值标定.md"
+    ]
+  },
+  {
+    "question": "你们的检索是怎么把向量和关键词结合起来的？",
+    "expected_sources": [
+      "readme/09_技术栈.md"
+    ]
+  },
+  {
+    "question": "对话记忆存在哪里，上线后能换成别的数据库吗？",
+    "expected_sources": [
+      "readme/09_技术栈.md"
+    ]
+  },
+  {
+    "question": "这套服务是怎么打包部署的，镜像大概多大？",
+    "expected_sources": [
+      "readme/09_技术栈.md"
+    ]
+  },
+  {
+    "question": "为啥不能直接把报错信息原样返回给用户？",
+    "expected_sources": [
+      "readme/10_设计决策.md"
+    ]
+  },
+  {
+    "question": "两阶段检索是怎么把准确率提上去的？",
+    "expected_sources": [
+      "readme/10_设计决策.md"
+    ]
+  },
+  {
+    "question": "Docker 镜像怎么从 3.5G 瘦到 2.4G 的？",
+    "expected_sources": [
+      "readme/10_设计决策.md"
+    ]
+  },
+  {
+    "question": "哪些故事跟环境或部署问题有关？",
+    "expected_sources": [
+      "stories/01_快速索引.md"
+    ]
+  },
+  {
+    "question": "模型缓存和容器这块是哪几个故事讲的？",
+    "expected_sources": [
+      "stories/01_快速索引.md"
+    ]
+  },
+  {
+    "question": "有哪些故事是讲依赖和兼容性坑的？",
+    "expected_sources": [
+      "stories/01_快速索引.md"
+    ]
+  },
+  {
+    "question": "为啥不直接用LangChain的结构化输出功能？",
+    "expected_sources": [
+      "stories/02_故事_1DeepSeek_不支持_json_schema.md"
+    ]
+  },
+  {
+    "question": "换个模型之后这套解析方案还能继续用吗？",
+    "expected_sources": [
+      "stories/02_故事_1DeepSeek_不支持_json_schema.md"
+    ]
+  },
+  {
+    "question": "PydanticOutputParser是怎么把结果转成对象的？",
+    "expected_sources": [
+      "stories/02_故事_1DeepSeek_不支持_json_schema.md"
+    ]
+  },
+  {
+    "question": "装了 langchain-mcp-adapters 后 fastmcp 怎么突然报错了？",
+    "expected_sources": [
+      "stories/03_故事_2fastmcp_和_langchain-mcp-adapters_版本冲突.md"
+    ]
+  },
+  {
+    "question": "为什么 pip 会把 mcp 降级然后搞坏 fastmcp？",
+    "expected_sources": [
+      "stories/03_故事_2fastmcp_和_langchain-mcp-adapters_版本冲突.md"
+    ]
+  },
+  {
+    "question": "fastmcp 和 langchain-mcp-adapters 冲突该怎么解决？",
+    "expected_sources": [
+      "stories/03_故事_2fastmcp_和_langchain-mcp-adapters_版本冲突.md"
+    ]
+  },
+  {
+    "question": "怎么让模型加载时不连外网？",
+    "expected_sources": [
+      "stories/04_故事_3HuggingFace_联网卡住.md"
+    ]
+  },
+  {
+    "question": "本地已经有模型了为啥还卡住？",
+    "expected_sources": [
+      "stories/04_故事_3HuggingFace_联网卡住.md"
+    ]
+  },
+  {
+    "question": "国内网络下跑RAG总超时怎么办？",
+    "expected_sources": [
+      "stories/04_故事_3HuggingFace_联网卡住.md"
+    ]
+  },
+  {
+    "question": "为什么 uvicorn 热重载时 asyncio.run 会报错？",
+    "expected_sources": [
+      "stories/05_故事_4uvicorn_--reload_下调_asynciorun_报错.md"
+    ]
+  },
+  {
+    "question": "FastAPI 里加载 MCP 工具应该放在哪个阶段执行？",
+    "expected_sources": [
+      "stories/05_故事_4uvicorn_--reload_下调_asynciorun_报错.md"
+    ]
+  },
+  {
+    "question": "怎样在服务启动时初始化 agent 而不是写在模块顶层？",
+    "expected_sources": [
+      "stories/05_故事_4uvicorn_--reload_下调_asynciorun_报错.md"
+    ]
+  },
+  {
+    "question": "为什么我的 Agent 调用 MCP 工具会报不支持同步调用的错？",
+    "expected_sources": [
+      "stories/06_故事_5MCP_工具同步调用报错.md"
+    ]
+  },
+  {
+    "question": "把 agent.invoke 换成异步写法能带来什么好处？",
+    "expected_sources": [
+      "stories/06_故事_5MCP_工具同步调用报错.md"
+    ]
+  },
+  {
+    "question": "FastAPI 项目里用同步方式跑 Agent 会有什么问题？",
+    "expected_sources": [
+      "stories/06_故事_5MCP_工具同步调用报错.md"
+    ]
+  },
+  {
+    "question": "为什么要等工具调用结束后才开始输出内容？",
+    "expected_sources": [
+      "stories/07_故事_6流式输出吞进中间步骤.md"
+    ]
+  },
+  {
+    "question": "纯聊天时打字机效果为什么会打折扣？",
+    "expected_sources": [
+      "stories/07_故事_6流式输出吞进中间步骤.md"
+    ]
+  },
+  {
+    "question": "工具调用完模型不输出文本会怎样？",
+    "expected_sources": [
+      "stories/07_故事_6流式输出吞进中间步骤.md"
+    ]
+  },
+  {
+    "question": "为什么Dockerfile里要先写复制依赖那一步？",
+    "expected_sources": [
+      "stories/08_故事_7Docker_构建慢.md"
+    ]
+  },
+  {
+    "question": "把模型打包进镜像能带来什么好处？",
+    "expected_sources": [
+      "stories/08_故事_7Docker_构建慢.md"
+    ]
+  },
+  {
+    "question": "后来为什么不在构建时下载模型了？",
+    "expected_sources": [
+      "stories/08_故事_7Docker_构建慢.md"
+    ]
+  },
+  {
+    "question": "MCP 服务里 print 怎么没反应？",
+    "expected_sources": [
+      "stories/09_故事_8MCP_Server_里的_print_看不到.md"
+    ]
+  },
+  {
+    "question": "为什么日志得写到 stderr 才行？",
+    "expected_sources": [
+      "stories/09_故事_8MCP_Server_里的_print_看不到.md"
+    ]
+  },
+  {
+    "question": "调试 MCP 时输出该往哪放？",
+    "expected_sources": [
+      "stories/09_故事_8MCP_Server_里的_print_看不到.md"
+    ]
+  },
+  {
+    "question": "混合检索里向量和BM25的权重怎么分配？",
+    "expected_sources": [
+      "stories/10_故事_9等权_RRF_反而更差.md"
+    ]
+  },
+  {
+    "question": "为什么等权重混合反而比纯向量检索效果差？",
+    "expected_sources": [
+      "stories/10_故事_9等权_RRF_反而更差.md"
+    ]
+  },
+  {
+    "question": "调权重的时候有什么经验可以参考吗？",
+    "expected_sources": [
+      "stories/10_故事_9等权_RRF_反而更差.md"
+    ]
+  },
+  {
+    "question": "MMR 为什么没法保证结果来自不同文件？",
+    "expected_sources": [
+      "stories/11_故事_10MMR_是_chunk_级多样性.md"
+    ]
+  },
+  {
+    "question": "怎么让检索结果按来源去重避免重复文档？",
+    "expected_sources": [
+      "stories/11_故事_10MMR_是_chunk_级多样性.md"
+    ]
+  },
+  {
+    "question": "MMR 惩罚的到底是什么样的内容？",
+    "expected_sources": [
+      "stories/11_故事_10MMR_是_chunk_级多样性.md"
+    ]
+  },
+  {
+    "question": "Agent 为什么会陷入一直调用工具的循环？",
+    "expected_sources": [
+      "stories/12_故事_11Agent_可能死循环或_Token_爆炸.md"
+    ]
+  },
+  {
+    "question": "有哪些办法能防止 Agent 把 Token 用超？",
+    "expected_sources": [
+      "stories/12_故事_11Agent_可能死循环或_Token_爆炸.md"
+    ]
+  },
+  {
+    "question": "护栏触发后服务是怎么保证不崩溃的？",
+    "expected_sources": [
+      "stories/12_故事_11Agent_可能死循环或_Token_爆炸.md"
+    ]
+  },
+  {
+    "question": "多轮对话里缓存怎么防止不同会话串数据？",
+    "expected_sources": [
+      "stories/13_故事_12多轮对话下的缓存串台.md"
+    ]
+  },
+  {
+    "question": "缓存键为什么要同时用会话ID和问题哈希？",
+    "expected_sources": [
+      "stories/13_故事_12多轮对话下的缓存串台.md"
+    ]
+  },
+  {
+    "question": "按会话分开缓存会不会让命中率变低？",
+    "expected_sources": [
+      "stories/13_故事_12多轮对话下的缓存串台.md"
+    ]
+  },
+  {
+    "question": "开发环境为啥都用内存版记忆组件？",
+    "expected_sources": [
+      "stories/14_故事_13InMemorySaver_的局限.md"
+    ]
+  },
+  {
+    "question": "服务重启后对话记录全没了怎么办？",
+    "expected_sources": [
+      "stories/14_故事_13InMemorySaver_的局限.md"
+    ]
+  },
+  {
+    "question": "面试聊技术选型时怎么体现自己考虑周全？",
+    "expected_sources": [
+      "stories/14_故事_13InMemorySaver_的局限.md"
+    ]
+  },
+  {
+    "question": "检索结果不相关时怎么让模型别硬答？",
+    "expected_sources": [
+      "stories/15_故事_14检索不到内容怎么避免幻觉.md"
+    ]
+  },
+  {
+    "question": "知识库里没有对应内容时系统该怎么处理？",
+    "expected_sources": [
+      "stories/15_故事_14检索不到内容怎么避免幻觉.md"
+    ]
+  },
+  {
+    "question": "如何判断检索到的片段值不值得交给大模型？",
+    "expected_sources": [
+      "stories/15_故事_14检索不到内容怎么避免幻觉.md"
+    ]
+  },
+  {
+    "question": "当前评测的召回率是怎么算出来的？",
+    "expected_sources": [
+      "stories/16_故事_15RAG_评估不能只看召回率.md"
+    ]
+  },
+  {
+    "question": "为什么说现在这套评测指标区分度不够？",
+    "expected_sources": [
+      "stories/16_故事_15RAG_评估不能只看召回率.md"
+    ]
+  },
+  {
+    "question": "评测里精确率具体是怎么定义的？",
+    "expected_sources": [
+      "stories/16_故事_15RAG_评估不能只看召回率.md"
+    ]
+  },
+  {
+    "question": "服务重启后对话记录怎么就不见了？",
+    "expected_sources": [
+      "stories/17_故事_16InMemorySaver_重启丢记忆.md"
+    ]
+  },
+  {
+    "question": "怎么让Agent记住用户之前聊过的内容？",
+    "expected_sources": [
+      "stories/17_故事_16InMemorySaver_重启丢记忆.md"
+    ]
+  },
+  {
+    "question": "代码里为什么用AsyncSqliteSaver而不是InMemorySaver？",
+    "expected_sources": [
+      "stories/17_故事_16InMemorySaver_重启丢记忆.md"
+    ]
+  },
+  {
+    "question": "为什么要把内存版的历史存储换成 SQLite？",
+    "expected_sources": [
+      "stories/18_故事_17双源记忆打架架构重构.md"
+    ]
+  },
+  {
+    "question": "改动后还需要自己手动去数据库捞聊天记录吗？",
+    "expected_sources": [
+      "stories/18_故事_17双源记忆打架架构重构.md"
+    ]
+  },
+  {
+    "question": "这种改法以后换成 Redis 麻烦不麻烦？",
+    "expected_sources": [
+      "stories/18_故事_17双源记忆打架架构重构.md"
+    ]
+  },
+  {
+    "question": "为什么异常信息里带 rate 就会误判成限流？",
+    "expected_sources": [
+      "stories/19_故事_18错误信息泄漏安全防护.md"
+    ]
+  },
+  {
+    "question": "怎么判断一个异常是不是请求太频繁了？",
+    "expected_sources": [
+      "stories/19_故事_18错误信息泄漏安全防护.md"
+    ]
+  },
+  {
+    "question": "认证失败和超时分别会返回什么提示？",
+    "expected_sources": [
+      "stories/19_故事_18错误信息泄漏安全防护.md"
+    ]
+  },
+  {
+    "question": "多轮对话里为啥同一个问题会重复调用模型？",
+    "expected_sources": [
+      "stories/20_故事_19缓存_key_不含上下文缓存正确性.md"
+    ]
+  },
+  {
+    "question": "缓存键只放用户提问会带来什么隐患？",
+    "expected_sources": [
+      "stories/20_故事_19缓存_key_不含上下文缓存正确性.md"
+    ]
+  },
+  {
+    "question": "上下文版本号加进缓存键后为啥命中率变成零了？",
+    "expected_sources": [
+      "stories/20_故事_19缓存_key_不含上下文缓存正确性.md"
+    ]
+  },
+  {
+    "question": "项目里到底需要装哪些Python包？",
+    "expected_sources": [
+      "stories/21_故事_20requirementstxt_从未在干净环境验证.md"
+    ]
+  },
+  {
+    "question": "怎么检查依赖清单有没有漏写？",
+    "expected_sources": [
+      "stories/21_故事_20requirementstxt_从未在干净环境验证.md"
+    ]
+  },
+  {
+    "question": "为什么依赖清单要在干净环境里验证？",
+    "expected_sources": [
+      "stories/21_故事_20requirementstxt_从未在干净环境验证.md"
+    ]
+  },
+  {
+    "question": "Docker 导出镜像时报错说数据损坏，这是代码写错了吗？",
+    "expected_sources": [
+      "stories/22_故事_21Docker_构建报_unpigz_corrupted2026-10-08.md"
+    ]
+  },
+  {
+    "question": "Docker Desktop 构建镜像卡在写盘阶段失败，该从哪查原因？",
+    "expected_sources": [
+      "stories/22_故事_21Docker_构建报_unpigz_corrupted2026-10-08.md"
+    ]
+  },
+  {
+    "question": "怎么确认 WSL 里 Docker 报错是不是磁盘空间满了导致的？",
+    "expected_sources": [
+      "stories/22_故事_21Docker_构建报_unpigz_corrupted2026-10-08.md"
+    ]
+  },
+  {
+    "question": "Docker Desktop 怎么把镜像数据换到别的盘？",
+    "expected_sources": [
+      "stories/23_故事_22Docker_数据从_C_盘迁到_D_盘2026-10-08.md"
+    ]
+  },
+  {
+    "question": "为什么删了镜像 C 盘空间还是没变多？",
+    "expected_sources": [
+      "stories/23_故事_22Docker_数据从_C_盘迁到_D_盘2026-10-08.md"
+    ]
+  },
+  {
+    "question": "WSL2 后端下 Docker 的磁盘文件放在哪？",
+    "expected_sources": [
+      "stories/23_故事_22Docker_数据从_C_盘迁到_D_盘2026-10-08.md"
+    ]
+  },
+  {
+    "question": "为啥我改完 pip 命令后构建就超时了？",
+    "expected_sources": [
+      "stories/24_故事_23pip_清华源突然超时2026-10-08.md"
+    ]
+  },
+  {
+    "question": "换阿里云源和加超时重试能一起用吗？",
+    "expected_sources": [
+      "stories/24_故事_23pip_清华源突然超时2026-10-08.md"
+    ]
+  },
+  {
+    "question": "怎么把 torch 的下载体积降下来？",
+    "expected_sources": [
+      "stories/24_故事_23pip_清华源突然超时2026-10-08.md"
+    ]
+  },
+  {
+    "question": "为啥直接pip装torch会下好几个G的东西？",
+    "expected_sources": [
+      "stories/25_故事_24CPU_版_torch_vs_CUDA_版2026-10-08.md"
+    ]
+  },
+  {
+    "question": "装CPU版torch能比CUDA版省多少空间？",
+    "expected_sources": [
+      "stories/25_故事_24CPU_版_torch_vs_CUDA_版2026-10-08.md"
+    ]
+  },
+  {
+    "question": "哪些CUDA相关的包在CPU版里根本不用装？",
+    "expected_sources": [
+      "stories/25_故事_24CPU_版_torch_vs_CUDA_版2026-10-08.md"
+    ]
+  },
+  {
+    "question": "为啥我在本机下载的wheel包放到容器里装不上？",
+    "expected_sources": [
+      "stories/26_故事_25Windows_wheel_不能给_Linux_容器用2026-10-08.md"
+    ]
+  },
+  {
+    "question": "用pip download给容器准备依赖时要注意啥？",
+    "expected_sources": [
+      "stories/26_故事_25Windows_wheel_不能给_Linux_容器用2026-10-08.md"
+    ]
+  },
+  {
+    "question": "宿主机和容器的Python环境不一样，下包会有什么坑？",
+    "expected_sources": [
+      "stories/26_故事_25Windows_wheel_不能给_Linux_容器用2026-10-08.md"
+    ]
+  },
+  {
+    "question": "Docker里跑MCP服务时模型路径找不到是什么原因？",
+    "expected_sources": [
+      "stories/27_故事_26MCP_Server_硬编码_HF_缓存路径2026-10-08.md"
+    ]
+  },
+  {
+    "question": "HF_HOME环境变量和容器默认路径哪个优先？",
+    "expected_sources": [
+      "stories/27_故事_26MCP_Server_硬编码_HF_缓存路径2026-10-08.md"
+    ]
+  },
+  {
+    "question": "启动时子进程崩了导致连接关闭该怎么排查？",
+    "expected_sources": [
+      "stories/27_故事_26MCP_Server_硬编码_HF_缓存路径2026-10-08.md"
+    ]
+  },
+  {
+    "question": "checkpointer 的数据库文件默认存哪儿？",
+    "expected_sources": [
+      "stories/28_故事_27checkpointsdb_无_volume容器重建丢记忆2026-10-08.md"
+    ]
+  },
+  {
+    "question": "怎么防止本地的数据文件被提交到 git？",
+    "expected_sources": [
+      "stories/28_故事_27checkpointsdb_无_volume容器重建丢记忆2026-10-08.md"
+    ]
+  },
+  {
+    "question": "容器重建后怎么确认对话记录还在？",
+    "expected_sources": [
+      "stories/28_故事_27checkpointsdb_无_volume容器重建丢记忆2026-10-08.md"
+    ]
+  },
+  {
+    "question": "评估脚本里的召回率是怎么算出来的？",
+    "expected_sources": [
+      "stories/29_故事_28评估代码和部署代码分叉2026-10-09.md"
+    ]
+  },
+  {
+    "question": "为什么说只看召回率不够，还得看精确率和MRR？",
+    "expected_sources": [
+      "stories/29_故事_28评估代码和部署代码分叉2026-10-09.md"
+    ]
+  },
+  {
+    "question": "公共逻辑被多处引用时应该怎么处理？",
+    "expected_sources": [
+      "stories/29_故事_28评估代码和部署代码分叉2026-10-09.md"
+    ]
+  },
+  {
+    "question": "为什么最后没选F1最高的那个阈值？",
+    "expected_sources": [
+      "stories/30_故事_29MAX_DISTANCE_阈值拍脑袋定2026-10-10.md"
+    ]
+  },
+  {
+    "question": "把幻觉率降下来付出了什么代价？",
+    "expected_sources": [
+      "stories/30_故事_29MAX_DISTANCE_阈值拍脑袋定2026-10-10.md"
+    ]
+  },
+  {
+    "question": "这次标定留下了哪些能复现的东西？",
+    "expected_sources": [
+      "stories/30_故事_29MAX_DISTANCE_阈值拍脑袋定2026-10-10.md"
+    ]
+  },
+  {
+    "question": "加了两阶段检索后精确率涨了多少？",
+    "expected_sources": [
+      "stories/31_故事_30Rerank_收益被语料规模压制2026-10-11.md"
+    ]
+  },
+  {
+    "question": "为什么Reranker没达到预期的提升效果？",
+    "expected_sources": [
+      "stories/31_故事_30Rerank_收益被语料规模压制2026-10-11.md"
+    ]
+  },
+  {
+    "question": "怎么才能让Rerank真正发挥出全部实力？",
+    "expected_sources": [
+      "stories/31_故事_30Rerank_收益被语料规模压制2026-10-11.md"
+    ]
+  },
+  {
+    "question": "怎么防止模型胡说八道？",
+    "expected_sources": [
+      "stories/32_总结.md"
+    ]
+  },
+  {
+    "question": "多个模型接口不一样怎么统一处理？",
+    "expected_sources": [
+      "stories/32_总结.md"
+    ]
+  },
+  {
+    "question": "Docker 构建怎么才能更快？",
+    "expected_sources": [
+      "stories/32_总结.md"
+    ]
+  }
+]

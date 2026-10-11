@@ -44,7 +44,9 @@ vectorstore = load_vectorstore(embedding=embedding)
 bm25, all_docs = build_bm25(vectorstore)
 print(f"加载 {len(all_docs)} 个 chunk\n")
 
-with open(Path(__file__).resolve().parent / "test_set.json", encoding="utf-8") as f:
+# 使用扩语料后的新测试集（249 条，覆盖 83 篇文档）
+# 旧测试集 test_set.json（30 条）已废弃——其中的 expected_sources 指向已删除的旧文档
+with open(Path(__file__).resolve().parent / "test_set_v2.json", encoding="utf-8") as f:
     test_set = json.load(f)
 print(f"加载 {len(test_set)} 个测试项\n")
 
@@ -143,7 +145,7 @@ print("=" * 70)
 
 baseline = random_baseline(test_set, all_docs, k=3)
 print(f"\n[随机基线] 召回率：{baseline:.1%}")
-print("  （从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率）\n")
+print(f"  （从 {len(all_docs)} 个 chunk 里随机抽 3 个，命中期望 source 的概率）\n")
 
 strategies = [
     ("普通相似度", search_similarity),

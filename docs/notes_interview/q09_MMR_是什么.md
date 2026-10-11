@@ -1,0 +1,14 @@
+# 9. MMR 是什么？
+
+**全称**：Maximal Marginal Relevance（最大边际相关性）。
+
+**公式**：
+```
+MMR = λ × Sim(query, chunk) - (1-λ) × max(Sim(chunk, 已选chunk))
+```
+
+**关键理解**：
+- MMR 在 **chunk 级别**做多样性，不是文档级别
+- 它避免的是"内容重复"，不是"来源重复"
+- 同一个文档里的两个差异大的 chunk，MMR 也会都选
+- 想保证"Top-3 来自不同文档"，需要额外按文档去重
