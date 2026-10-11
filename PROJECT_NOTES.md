@@ -2,11 +2,11 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
-> 最后更新：2026-10-10（新增 MAX_DISTANCE 阈值标定：1.1 → 1.0）
+> 最后更新：2026-10-11（新增 Rerank 精排：精确率 0.86 → 0.90）
 
 ## 一、项目简介（30 秒版本）
 
-基于 LangGraph + MCP + RAG 的企业级 Agent 服务，用 FastAPI 提供 HTTP 接口，支持 SSE 流式输出，Docker 容器化部署。
+基于 LangGraph + MCP + RAG 的企业级 Agent 服务，用 FastAPI 提供 HTTP 接口，支持 SSE 流式输出，Docker 容器化部署。检索用"混合检索 + Rerank"两阶段 pipeline。
 
 ## 二、架构图
 
@@ -37,13 +37,14 @@ FastAPI（api_agent.py）
     │       ↓                           │
     │  降级判断（MAX_DISTANCE=1.0）      │
     │       ↓ 通过                      │
-    │  混合检索：                        │
-    │  向量检索 Top-9  +  BM25 Top-9    │
+    │  混合检索召回 Top-20：             │
+    │  向量 Top-20 + BM25 Top-20        │
     │       ↓                           │
     │  加权 RRF 合并（向量0.7+BM25 0.3） │
     │       ↓                           │
-    │  Top-3 返回                        │
-    │                                    │
+    │  Rerank 精排 Top-3                │
+    │  （bge-reranker-base, CrossEncoder）│
+    │       ↓                           │
     │  降级：距离超阈值 → 返回"没找到"    │
     └─────────────────────────────────┘
                    ↓
@@ -70,7 +71,9 @@ FastAPI（api_agent.py）
 | Agent 编排 | LangChain 1.4 + LangGraph 1.2 |
 | 模型 | DeepSeek（OpenAI 兼容协议） |
 | 工具协议 | MCP（FastMCP 3.4.8） |
-| 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF（`rag_core/search.py` 公共模块） |
+| Embedding | bge-small-zh-v1.5（512 维，双塔） |
+| Rerank | bge-reranker-base（CrossEncoder，交叉编码器） |
+| 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF + Rerank |
 | 降级 | 向量距离阈值（标定 1.0，避免幻觉） |
 | 记忆持久化 | AsyncSqliteSaver（生产可换 PostgresSaver） |
 | 展示层 | MySQL（对话历史，只读） |
@@ -82,7 +85,9 @@ FastAPI（api_agent.py）
 
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启/容器重建都不丢
 - RAG 检索增强（本地 embedding + FAISS 向量库）
+- **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
 - 混合检索（向量 + BM25 + 加权 RRF）
+- **Rerank 精排**（bge-reranker-base，精确率 0.86 → 0.90）
 - 降级策略（距离阈值标定 1.0，避免幻觉）
 - MCP 工具解耦（Agent 和工具分进程）
 - SSE 流式输出（打字机效果）
@@ -144,6 +149,7 @@ class LocalEmbeddings(Embeddings):
 ```
 
 - 用本地 `BAAI/bge-small-zh-v1.5` 模型，512 维
+- **双塔模型**：query 和 doc 分别编码成向量，算余弦相似度
 - 封装成 LangChain 的 `Embeddings` 接口
 - 完全离线，不消耗 API
 - **HF 缓存路径由 `HF_HOME` 环境变量控制**（三级探测，见面试题 22）
@@ -262,7 +268,60 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 - 加权（0.7/0.3）：100% 召回率
 - **向量检索更可靠，给它更高权重**
 
-#### 5.4 降级策略（避免幻觉）
+#### 5.4 Rerank 精排（2026-10-11 新增）
+
+**为什么需要**：混合检索是"双塔 + 关键词"的粗排，速度快但精度有限。Rerank 用交叉编码器把 Top-20 精排到 Top-3，精度更高。
+
+**双塔 vs 交叉编码器**：
+
+| 类型 | 代表模型 | 输入 | 速度 | 精度 |
+|---|---|---|---|---|
+| 双塔（Embedding） | bge-small-zh-v1.5 | 单条文本 | 快（毫秒级） | 粗 |
+| 交叉编码器（Rerank） | bge-reranker-base | **(query, doc) 对** | 慢（百毫秒级） | 精 |
+
+**实现**：
+
+```python
+from sentence_transformers import CrossEncoder
+
+RERANKER_MODEL = "BAAI/bge-reranker-base"
+_reranker = None  # 懒加载
+
+def _get_reranker():
+    global _reranker
+    if _reranker is None:
+        _reranker = CrossEncoder(RERANKER_MODEL, max_length=512)
+    return _reranker
+
+def rerank(query, docs, top_k=3):
+    reranker = _get_reranker()
+    pairs = [(query, doc.page_content) for doc in docs]
+    scores = reranker.predict(pairs)
+    ranked = sorted(zip(docs, scores), key=lambda x: float(x[1]), reverse=True)
+    return [doc for doc, _ in ranked[:top_k]]
+
+def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
+                               recall_k=20, final_k=3, **hybrid_kwargs):
+    candidates = hybrid_search(query, vectorstore, bm25, all_docs, k=recall_k, **hybrid_kwargs)
+    if not candidates:
+        return []
+    return rerank(query, candidates, top_k=final_k)
+```
+
+**效果**（30 条测试项）：
+
+| 策略 | 召回率 | 精确率 | MRR | 多样性 |
+|---|---|---|---|---|
+| 混合检索 | 96.7% | 0.86 | 0.94 | 1.30 |
+| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
+
+- 精确率 **+0.04**，MRR **+0.03**
+- 召回率不变（Rerank 不解决"召回阶段漏掉"的问题）
+- 多样性略降（Rerank 偏向最相关，牺牲多样性）——**符合预期**
+
+**懒加载设计**：Reranker 模型 3.36 GB，加载要 10~20 秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，之后复用。**不拖慢服务启动**。
+
+#### 5.5 降级策略（避免幻觉）
 
 **问题**：检索不到相关内容时，如果直接调 LLM，模型可能基于无关片段产生幻觉。
 
@@ -280,7 +339,7 @@ MAX_DISTANCE = 1.0
 ```python
 @mcp.tool
 def search_knowledge(query: str) -> str:
-    results = hybrid_search(query, vectorstore, bm25, all_docs, k=3, verbose=True)
+    results = hybrid_search_with_rerank(query, ..., recall_k=20, final_k=3, verbose=True)
     if not results:
         return "知识库中没有找到相关信息。"
     return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
@@ -349,6 +408,7 @@ def search_knowledge(query: str) -> str:
 | **checkpoints.db 无 volume** | DB 存在容器内部，`docker compose down` 后记忆全丢 | compose 加 `./data:/app/rag_api/data`，代码用 `DATA_DIR` 环境变量 |
 | **评估脚本和服务端代码分叉** | 两份 `hybrid_search`，参数还不一样 | 抽到 `rag_core/search.py`，两边都 import |
 | **MAX_DISTANCE 拍脑袋定** | 原值 1.1 是跑了几条样例的约数，无统计支撑 | `eval/calibrate_distance.py` 标定 → 1.0（P=0.967, R=0.967） |
+| **Rerank 收益被语料规模压制** | 只有 2 文档 / 102 chunk，天花板效应 | 记录此局限，下一步扩语料到 500+ chunk |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -368,17 +428,27 @@ def search_knowledge(query: str) -> str:
 6. 检索结果拼进 Prompt
 7. 模型生成回答
 
+**进阶版（你项目用的）**：
+1. 文档加载 → 2. 切分 → 3. Embedding → 4. 存入 FAISS
+5. 用户提问 → **混合检索召回 Top-20（向量 + BM25 + RRF）**
+6. **Rerank 精排 Top-3（CrossEncoder）**
+7. **降级判断（距离阈值）**
+8. 检索结果拼进 Prompt → 模型生成回答
+
 ### 3. 怎么防止 RAG 幻觉？
 
-**两层防护**：
+**两层防护 + Rerank**：
 
 **第一层（Prompt 软约束）**：
 - Prompt 里加"只使用资料中的信息，不要编造"
 
 **第二层（检索层硬降级）**：
-- 用向量距离做阈值，超过就返回"知识库中没有相关信息"
+- 用向量距离做阈值（标定 1.0），超过就返回"知识库中没有相关信息"
 - 不调 LLM，从根源上避免幻觉
-- 加评估集，量化回答准确率
+
+**加分项（精排）**：
+- 混合检索的 Top-20 用 Reranker 精排，把不相关的候选挤下去
+- 精确率 0.86 → 0.90
 
 ### 4. InMemorySaver 和 PostgresSaver 区别？
 
@@ -415,6 +485,7 @@ def search_knowledge(query: str) -> str:
 - 加 Redis 限流（incr + expire）
 - 多 worker 部署（uvicorn --workers N 或 gunicorn）
 - 反向代理（Nginx）分担负载
+- **Reranker 是瓶颈**：单条 query 精排约 100~300 ms（CPU 上），高并发可以换更小的 Reranker 或加缓存
 
 ### 8. 文档切分参数怎么定？
 
@@ -566,11 +637,12 @@ result = await agent.ainvoke(
 | 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
 | MMR | 100% | 0.83 | 0.97 | 1.43 |
 | MMR + 去重 | 100% | 0.77 | 0.97 | **1.57** |
-| 混合检索（降级 1.0） | 96.7% | 0.86 | 0.94 | 1.30 |
+| 混合检索 | 96.7% | 0.86 | 0.94 | 1.30 |
+| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
 | **随机基线** | **84.1%** | — | — | — |
 
 **面试话术**：
-> "我评估 RAG 用了四个指标 + 随机基线。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。随机基线用组合公式精确计算——从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。四种策略对照这个地板就知道：我的测试集判别力有限（只有 15.9 个点的空间），下一步要扩语料到 500+ chunk 加 chunk 级标注。"
+> "我评估 RAG 用了四个指标 + 随机基线。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。随机基线用组合公式精确计算——从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。加了 Rerank 后精确率从 0.86 提到 0.90，MRR 从 0.94 提到 0.97。但 Rerank 收益被语料规模压制——只有 2 文档 102 chunk，下一步要扩语料到 500+ 才能发挥全部威力。"
 
 ### 15. 错误信息怎么处理？
 
@@ -603,12 +675,12 @@ def friendly_error(e: Exception) -> str:
 ### 16. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
-- RAG 加 Rerank（bge-reranker-base）
 - 加 API Key 鉴权和限流
 - 加 LangSmith 可观测性
 - 写单元测试和集成测试
-- 文档库扩充到几百个文件，让不同检索策略的差异更明显
+- 文档库扩充到几百个文件，让 Rerank 和不同检索策略的差异更明显
 - 加 chunk 级评估（不只是文档级）
+- 加端到端评估（LLM-as-judge）
 
 ### 17. Docker 构建失败怎么排查？
 
@@ -820,14 +892,63 @@ from rag_core.search import hybrid_search, ...
 **面试话术**：
 > "MAX_DISTANCE=1.0 不是拍脑袋定的。我构造了 30 条正样本和 25 条负样本，对每条跑 best_distance，画分布直方图看分离点，再扫阈值从 0.5 到 1.5 画 PR 曲线。F1 最大化的点是 1.06，但我取了 1.00——因为这个点上精确率还能保持 96.7%，幻觉率从 9.1% 降到 3.3%，代价只是 3.3% 的漏答。RAG 场景下用户宁可听到'不知道'也不要被编造。标定脚本和结果图都在仓库里，可以复现。"
 
+### 25. 为什么要加 Rerank？（2026-10-11 新增）
+
+**问题**：混合检索（向量 + BM25 + RRF）是"双塔 + 关键词"的粗排——快但精度有限。Top-3 里可能混进一些语义上相关但实际帮助不大的 chunk。
+
+**方案**：用 `bge-reranker-base` 交叉编码器对混合检索召回的 Top-20 精排到 Top-3。
+
+**双塔 vs 交叉编码器**：
+
+| 维度 | 双塔（bge-small） | 交叉编码器（bge-reranker） |
+|---|---|---|
+| 结构 | query 和 doc 分别编码 | (query, doc) 拼一起送进模型 |
+| 速度 | 快（毫秒级） | 慢（百毫秒级） |
+| 精度 | 粗 | 精 |
+| 用途 | 大规模召回 | 小规模精排 |
+
+**关键设计：两阶段检索**
+1. **粗排**：混合检索召回 Top-20（保证召回率）
+2. **精排**：Reranker 打分保留 Top-3（保证精确率）
+
+**为什么不能只用 Reranker**：
+- Reranker 要对每条 (query, doc) 跑一次模型
+- 102 个 chunk → 102 次推理，100 ms × 102 = 10 秒/查询——太慢
+- 所以先用双塔快速筛到 20 条，再用 Reranker 精排
+
+**实现要点**：
+- **懒加载**：Reranker 模型 3.36 GB，加载 10~20 秒。用 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**
+- **`CrossEncoder`**：sentence-transformers 的封装，输入 `[(query, doc), ...]`，输出分数数组
+
+**效果**（30 条测试项）：
+
+| 策略 | 召回率 | 精确率 | MRR | 多样性 |
+|---|---|---|---|---|
+| 混合检索 | 96.7% | 0.86 | 0.94 | 1.30 |
+| 混合检索 + Rerank | 96.7% | **0.90** | **0.97** | 1.17 |
+
+- 精确率 **+0.04**
+- MRR **+0.03**
+- 召回率不变（Rerank 不解决"召回阶段漏掉"的问题）
+- 多样性略降（Rerank 偏向最相关）
+
+**诚实的局限**：
+- Rerank 收益被语料规模压制——只有 2 文档 102 chunk，判别空间有限
+- 扩到 500+ chunk 才能发挥 Reranker 全部威力
+- 面试时**主动说这个局限**，比"Rerank 提升很大"更可信
+
+**面试话术**：
+> "我加了两阶段检索：混合检索召回 Top-20，用 bge-reranker-base 交叉编码器精排 Top-3。精确率从 0.86 提到 0.90，MRR 从 0.94 提到 0.97。Reranker 是懒加载的——第一次调用才加载 3.36 GB 模型，不拖慢服务启动。这里有个诚实的局限：Rerank 收益被语料规模压制，只有 2 文档 102 chunk，判别空间有限。下一步扩到 500+ chunk 才能发挥全部威力。"
+
 ## 八、项目数据（面试时能报的具体数字）
 
 - 工具数量：1 个（search_knowledge）
 - 知识库文档数：2 个 Markdown 文件（真实笔记）
 - 切分后块数：102 块
-- Embedding 模型：BAAI/bge-small-zh-v1.5（512 维）
+- Embedding 模型：BAAI/bge-small-zh-v1.5（512 维，双塔，192 MB）
+- **Rerank 模型：BAAI/bge-reranker-base（CrossEncoder，3.36 GB）**
 - 向量库：FAISS（本地持久化）
-- 检索策略：混合检索（向量 + BM25 + 加权 RRF）
+- 检索策略：**两阶段检索**（混合检索召回 Top-20 + Rerank 精排 Top-3）
 - RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=1.0（标定得出，P=0.967, R=0.967, F1=0.967）
 - 幻觉率：9.1% → 3.3%（用 3.3% 漏答换）
@@ -836,7 +957,7 @@ from rag_core.search import hybrid_search, ...
 - 展示层：MySQL（表 conversations）
 - 评估指标：召回率 / 精确率 / MRR / 多样性 / 随机基线（30 个测试项）
 - 首次 Docker 构建耗时：约 19 分钟（CUDA）→ **5~10 分钟**（CPU）
-- 单次请求耗时：2~3 秒
+- 单次请求耗时：2~3 秒（首次含 Reranker 加载 10~20 秒）
 - 镜像大小：10.4 GB → **2.42 GB**（content 519 MB）
 - Docker 数据位置：`D:\Docker`（55.73 GB）
 - C 盘可用空间：10.20 GB → **65.25 GB**
@@ -845,7 +966,7 @@ from rag_core.search import hybrid_search, ...
 - checkpoints 持久化：`./data/checkpoints.db`（volume 挂载，容器重建不丢）
 - data/ 目录：`.gitignore` 已忽略
 - 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用）
-- 评估可复现：`python eval/eval_retrieval.py` 一条命令跑出所有数字（含 84.1% 随机基线）
+- 评估可复现：`python eval/eval_retrieval.py` 一条命令跑出所有数字（含 84.1% 随机基线 + Rerank 对比）
 - 阈值标定：`python eval/calibrate_distance.py`（正样本 30 + 负样本 25）
 
 ## 九、可演示的操作
@@ -859,9 +980,10 @@ from rag_core.search import hybrid_search, ...
 7. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
 8. 用浏览器打开 client.html，看打字机效果
 9. 展示 Docker 一键启动：`docker compose up -d`
-10. **展示评估可复现**：`python eval/eval_retrieval.py` → 一条命令输出所有指标 + 84.1% 随机基线
+10. **展示评估可复现**：`python eval/eval_retrieval.py` → 输出 5 种策略 + 84.1% 随机基线
 11. **展示阈值标定**：`python eval/calibrate_distance.py` → 输出正负样本距离分布 + PR 曲线
-12. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+12. **展示两阶段检索日志**：`docker logs agent-api` → 看到 `[Rerank] 候选 20 条 → Top-3`
+13. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -884,17 +1006,32 @@ from rag_core.search import hybrid_search, ...
 
 | 模型 | 维度 | 特点 |
 |---|---|---|
-| bge-small-zh-v1.5 | 512 | 轻量，中文好，我用这个 |
+| bge-small-zh-v1.5 | 512 | 轻量，中文好，我用这个（召回） |
 | bge-base-zh-v1.5 | 768 | 效果更好，慢一点 |
 | bge-large-zh-v1.5 | 1024 | 效果最好，吃内存 |
 | text-embedding-3-small | 1536 | OpenAI 官方，需付费 |
 
+### Rerank 模型选型
+
+| 模型 | 参数量 | 大小 | 特点 |
+|---|---|---|---|
+| bge-reranker-base | 278M | 1.1 GB | 我用这个，中英双语 |
+| bge-reranker-large | 560M | 2.2 GB | 效果更好，慢 2 倍 |
+| bge-reranker-v2-m3 | 568M | 2.3 GB | 最新，多语言 |
+| Cohere Rerank | 闭源 | API | 需付费，无需部署 |
+| Jina Reranker | - | - | 长上下文优势 |
+
+**bge-reranker-base 的选择理由**：
+- 中英双语都支持
+- 3 GB 大小，CPU 上单条推理 100~300 ms
+- 有开源权重，完全离线
+
 ### Rerank 是什么
 
-- 向量检索：双塔模型，快但粗，用于粗排
-- Rerank：交叉编码器，慢但精，用于精排
-- 流程：向量检索 Top-10 → Rerank → 取 Top-3
-- 常用模型：BAAI/bge-reranker-base
+- **向量检索**：双塔模型，query 和 doc 分别编码，算余弦相似度——**快但粗**
+- **Rerank**：交叉编码器，把 `(query, doc)` 拼一起送进模型打分——**慢但精**
+- **流程**：向量检索 Top-20 → Rerank → 取 Top-3
+- **为什么两阶段**：Reranker 逐条推理太慢，先粗排缩小范围
 
 ### RAG 评估指标
 
@@ -1234,6 +1371,7 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 | RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 + 随机基线 |
 | 评估怎么保证可复现？ | 抽公共 `rag_core/search.py`，一条命令跑出所有数字 |
 | 阈值怎么定？ | 正负样本距离分布 + PR 曲线标定 |
+| 为什么要 Rerank？ | 双塔召回粗，交叉编码器精排 |
 
 ## 十三、RAG 评估（面试重点）
 
@@ -1314,31 +1452,36 @@ def random_baseline(test_set, all_docs, k=3):
 | MMR | 100% | 0.83 | 0.97 | 1.43 |
 | MMR + 按来源去重 | 100% | 0.77 | 0.97 | **1.57** |
 | 混合检索（带降级 1.0） | 96.7% | 0.86 | 0.94 | 1.30 |
+| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
 | 随机基线 | **84.1%** | — | — | — |
 
-> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线）。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
+> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线 + Rerank）。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
 
 ### 关键发现
 
-**1. 混合检索的精度取向**
+**1. Rerank 是精确率的最后一块拼图**
 
-- 带降级（MAX_DISTANCE=1.0）后召回率 96.7%，精确率 0.86，略低于纯相似度（0.87）
-- 代价是 1 条正样本被拒答，换来 5.8 个百分点的幻觉率降低
+- 混合检索精确率 0.86 → Rerank 后 0.90
+- MRR 0.94 → 0.97
+- **但召回率不变**（Rerank 只重排，不召回）
 
-**2. 精确率和多样性呈明显 trade-off**
+**2. Rerank 收益被语料规模压制**
 
-- 相似度：精确率最高（0.87），多样性最低（1.37）
+- 只有 2 文档 / 102 chunk，判别空间有限
+- 扩到 500+ chunk 才能发挥 Reranker 全部威力
+- **主动承认这个局限**，比夸张提升更可信
+
+**3. 精确率和多样性呈明显 trade-off**
+
+- 相似度/混合检索：精确率高，多样性低
 - MMR + 去重：多样性最高（1.57），精确率最低（0.77）
-
-**3. MRR 几乎不变（0.94~0.97）**
-
-四种策略的 Top-1 都很准。
+- Rerank 进一步压低多样性（1.17）——只选最相关的
 
 **4. 选哪个策略取决于业务**
 
 | 场景 | 推荐策略 |
 |---|---|
-| 追求精确（如事实查询） | 相似度 |
+| 追求精确（如事实查询） | **混合检索 + Rerank** |
 | 需要多角度（如分析任务） | MMR + 去重 |
 | 平衡 | MMR |
 
@@ -1370,7 +1513,7 @@ def random_baseline(test_set, all_docs, k=3):
 - **文档级召回而非 chunk 级**：用 `source`（文件名）判断命中，只有两三篇文档，命中太容易，含金量不高。生产环境应该标注 chunk id 或关键句。
 - **30 条样本太少**：3% 的差异（97% vs 93%）是一条样本的差别，统计上无意义。应该扩到 200 条以上。
 - **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness。
-- **随机基线 84.1%**：语料太小（2 文档/102 chunk），天花板效应明显，判别空间只有 15.9 个点。
+- **随机基线 84.1%**：语料太小（2 文档/102 chunk），天花板效应明显，判别空间只有 15.9 个点。**这也是 Rerank 提升有限的原因。**
 
 **架构层面**：
 | 位置 | 问题 | 生产级解法 |
@@ -1384,6 +1527,7 @@ def random_baseline(test_set, all_docs, k=3):
 | ~~HF 缓存路径硬编码~~ | ~~`Path.home()/.cache/huggingface/...` 依赖精确路径~~ | ✅ 2026-10-08 已修复：三级探测 |
 | ~~checkpoints 无 volume~~ | ~~`docker compose down` 后记忆全丢~~ | ✅ 2026-10-08 已修复：挂载到 `./data/` |
 | ~~评估代码分叉~~ | ~~评估脚本和服务端各有一份 hybrid_search，参数不一致~~ | ✅ 2026-10-09 已修复：抽到 `rag_core/search.py` |
+| **Rerank 收益被语料规模压制** | **只有 2 文档 102 chunk，判别空间有限** | **扩语料到 500+ chunk** |
 
 ### 改进方案
 
@@ -1402,14 +1546,15 @@ def random_baseline(test_set, all_docs, k=3):
 | HF_HOME 三级探测 | 本地/容器都能跑 | ✅ 已做 |
 | 抽公共检索模块 | rag_core/search.py | ✅ 已做 |
 | 阈值标定 | 正负样本距离分布 + PR 曲线 | ✅ 已做（MAX_DISTANCE 1.1→1.0） |
-| Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ⏳ 待做 |
+| **Rerank 精排** | **bge-reranker-base 对 Top-20 重排** | ✅ 已做（精确率 0.86→0.90） |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
 | 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
+| 扩语料 | 500+ chunk，让 Rerank 发挥全部威力 | ⏳ 待做 |
 | 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
 
 ### 面试答题模板
 
-> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。实测发现：纯相似度召回 100%、精确率 0.87；混合检索带距离降级后召回 96.7%、精确率 0.86，代价是 1 条正样本被拒，换来 5.8 个百分点的幻觉率降低。MMR+去重多样性 1.57，但精确率降到 0.77。四种策略对照随机基线 84.1%，说明我的测试集判别力有限（只有 15.9 个点）。降级阈值 MAX_DISTANCE 也是标定出来的——正样本 30 条 + 负样本 25 条，扫 101 个候选点选 P/R 平衡点 1.0，幻觉率从 9.1% 降到 3.3%。所有数字都能用 `python eval/eval_retrieval.py` 和 `python eval/calibrate_distance.py` 复现。"
+> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。检索 pipeline 是两阶段：混合检索召回 Top-20（向量 + BM25 + 加权 RRF），再用 bge-reranker-base 交叉编码器精排 Top-3。Rerank 把精确率从 0.86 提到 0.90，MRR 从 0.94 提到 0.97。降级阈值 MAX_DISTANCE 也是标定出来的——正样本 30 条 + 负样本 25 条，扫 101 个候选点选 P/R 平衡点 1.0，幻觉率从 9.1% 降到 3.3%。所有数字都能用 `python eval/eval_retrieval.py` 和 `python eval/calibrate_distance.py` 复现。诚实的局限：Rerank 收益被语料规模压制（只有 2 文档 102 chunk），下一步扩到 500+ chunk 才能发挥全部威力。"
 
 ## 十四、Docker 部署完整方案（面试重点）
 
@@ -1557,13 +1702,26 @@ torch
 | 20:20 | 重跑评估，混合检索召回 100% → 96.7% | 有意取舍 ✅ |
 | 20:30 | Git 提交 | `466e671` ✅ |
 
+**2026-10-11（Rerank）**
+
+| 时间 | 问题 | 动作 |
+|---|---|---|
+| 13:58 | 恢复 Docker 环境 | 容器都 Up ✅ |
+| 14:00 | 下载 bge-reranker-base（3.36 GB） | 2 分 23 秒下完 ✅ |
+| 14:10 | 改 `rag_core/search.py` 加 `rerank` + `hybrid_search_with_rerank` | import OK ✅ |
+| 14:15 | 改 `mcp_rag_server.py` 用新 pipeline | 本地验证 OK ✅ |
+| 14:20 | 改 `eval_retrieval.py` 加 Rerank 策略 | 5 策略对比 ✅ |
+| 14:25 | 跑评估：精确率 0.86 → 0.90，MRR 0.94 → 0.97 | ✅ |
+| 14:30 | 容器端到端测试 | ✅ |
+| 14:35 | Git 提交 | `37d47f1` ✅ |
+
 ### 14.5 面试话术（Docker 部署）
 
-> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要 bge-small-zh-v1.5 模型，我把它下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 1.0，幻觉率从 9.1% 降到 3.3%。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
+> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，3.36 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 1.0，幻觉率从 9.1% 降到 3.3%。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，精确率从 0.86 提到 0.90。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
 
 ## 十五、项目新增数据（更新）
 
-### Docker 部署相关（2026-10-08 ~ 2026-10-10）
+### Docker 部署相关（2026-10-08 ~ 2026-10-11）
 
 - Docker 数据位置：`D:\Docker`（55.73 GB）
 - C 盘可用空间：10.20 GB → **65.25 GB**
@@ -1578,16 +1736,20 @@ torch
 - 阈值标定：`eval/calibrate_distance.py`（正样本 30 + 负样本 25）
 - MAX_DISTANCE：1.1 → **1.0**（P=0.967, R=0.967, F1=0.967）
 - 幻觉率降低：9.1% → **3.3%**（用 3.3% 漏答换）
+- **Reranker 模型：bge-reranker-base（3.36 GB，本地缓存）**
+- **Rerank 提升：精确率 0.86 → 0.90，MRR 0.94 → 0.97**
 
 ### Git 仓库状态（最新）
 
 - 新增 commit：
+  - `37d47f1` feat: 加 Rerank 精排（bge-reranker-base），精确率 0.86 → 0.90
+  - `f89cda3` docs: 补充 MAX_DISTANCE 阈值标定（1.1 → 1.0）的说明和实验数据
   - `466e671` feat: 标定 MAX_DISTANCE 阈值（1.1 → 1.0），幻觉率从 9.1% 降到 3.3%
   - `99af642` refactor: 抽公共 hybrid_search 到 rag_core，评估脚本加随机基线
   - `6f9f286` fix: 修复 HF 缓存路径和 checkpoints 持久化
   - `d7967f6` docs: 更新复盘笔记与 README，补充 Docker 部署和踩坑经验
 - `.gitignore` 关键规则：
-  - `hf_cache/`（模型缓存，192 MB+）
+  - `hf_cache/`（模型缓存，embedding 192 MB + reranker 3.36 GB）
   - `data/`（checkpoints 持久化目录）
   - `wheelhouse/`（Docker wheel 缓存）
   - `checkpoints.db*` `*.sqlite` `*.sqlite3`（运行时数据库）
@@ -1606,8 +1768,10 @@ torch
 - 相似度：召回率 100%，精确率 0.87，MRR 0.96，多样性 1.37
 - MMR：召回率 100%，精确率 0.83，MRR 0.97，多样性 1.43
 - MMR + 去重：召回率 100%，精确率 0.77，MRR 0.97，多样性 1.57
-- **混合检索（降级 1.0）：召回率 96.7%，精确率 0.86，MRR 0.94，多样性 1.30**
+- 混合检索（降级 1.0）：召回率 96.7%，精确率 0.86，MRR 0.94，多样性 1.30
+- **混合检索 + Rerank：召回率 96.7%，精确率 0.90，MRR 0.97，多样性 1.17**
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
+- Rerank 参数：recall_k=20, final_k=3, RERANKER_MODEL="BAAI/bge-reranker-base"
 - 降级阈值：MAX_DISTANCE=1.0（标定得出，P=0.967, R=0.967）
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，容器重建不丢）
@@ -1616,11 +1780,11 @@ torch
 - Redis：依赖保留，预留做限流
 - 错误处理：`friendly_error` 用异常类型映射，不泄漏内部信息
 - requirements.txt：18 个包 + 顶部 2 行（CPU 索引），已在干净 venv 里验证可导入
-- 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用同一份 `hybrid_search`）
-- 评估可复现：`python eval/eval_retrieval.py` 一条命令输出所有指标 + 84.1% 随机基线
+- 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用同一份 `hybrid_search` 和 `rerank`）
+- 评估可复现：`python eval/eval_retrieval.py` 一条命令输出所有指标 + 84.1% 随机基线 + Rerank 对比
 - 阈值标定：`python eval/calibrate_distance.py` 输出正负样本距离分布 + PR 曲线
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ---
 
-**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通、评估可复现、阈值有实验支撑**，可进入面试冲刺阶段。
+**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通、评估可复现、阈值有实验支撑、Rerank 精排就位**，可进入面试冲刺阶段。

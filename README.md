@@ -17,7 +17,9 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
                             ↓
                     降级判断（距离阈值 1.0）
                             ↓ 通过
-                    混合检索（向量 + BM25 + 加权 RRF）
+                    混合检索召回 Top-20（向量 + BM25 + 加权 RRF）
+                            ↓
+                    Rerank 精排 Top-3（bge-reranker-base, CrossEncoder）
                             ↓
                         FAISS 向量库
                             ↓ 检索结果返回给 Agent
@@ -41,7 +43,9 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，服务重启/容器重建不丢历史
 - **RAG 检索增强**：本地 embedding（BAAI/bge-small-zh-v1.5）+ FAISS 持久化
+- **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
 - **混合检索**：向量 + BM25 + 加权 RRF（向量 0.7 / BM25 0.3）
+- **Rerank 精排**：bge-reranker-base（CrossEncoder），精确率 0.86 → 0.90
 - **公共检索模块**：`rag_core/search.py`，服务端和评估脚本共用同一份 `hybrid_search`
 - **降级策略**：向量距离阈值（标定为 1.0），检索不到就不调 LLM，避免幻觉
 - **MCP 工具解耦**：工具独立成 Server，跨进程 stdio 通信
@@ -49,7 +53,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 - **MySQL 展示层**：对话历史按 thread_id 持久化，供 `/history` 接口查询
 - **Agent 护栏**：`recursion_limit=10` + `max_tokens=2000`，防止死循环和 Token 爆炸
 - **友好错误处理**：异常映射为可读提示，不泄漏 API key、路径等内部信息
-- **RAG 评估**：30 个测试项，四指标对比 + 随机基线，一条命令可复现
+- **RAG 评估**：30 个测试项，五指标对比 + 随机基线，一条命令可复现
 - **阈值标定**：正负样本距离分布 + PR 曲线，幻觉率从 9.1% 降到 3.3%
 - **Docker 部署**：多阶段构建，镜像 2.42 GB，一键启动
 
@@ -58,13 +62,13 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 | 文件夹 | 内容 |
 |---|---|
 | `rag_api/` | FastAPI + Agent 服务（核心） |
-| `rag_core/search.py` | 公共检索模块（服务端 + 评估脚本共用） |
+| `rag_core/search.py` | 公共检索模块（含 Rerank，服务端 + 评估脚本共用） |
 | `mcp_test/mcp_rag_server.py` | RAG MCP Server |
 | `docs/` | 知识库文档（真实笔记） |
 | `eval/` | RAG 评估脚本 + 测试集 + 阈值标定 |
 | `eval/output/` | 标定产生的图（距离分布 + PR 曲线） |
 | `faiss_index/` | FAISS 索引（204 KB + 44 KB，已提交进 Git） |
-| `hf_cache/` | HuggingFace 模型缓存（volume 挂载进容器，不提交） |
+| `hf_cache/` | HuggingFace 模型缓存（embedding + reranker，volume 挂载） |
 | `data/` | checkpoints.db 持久化目录（volume 挂载，不提交） |
 | `first_test/` | 早期手写 Agent 练习 |
 | `langchain_test/` | LangChain 组件学习 |
@@ -89,11 +93,16 @@ uvicorn api_agent:app --reload
 ### Docker 部署
 
 ```bash
-# 1. 首次使用前：本地下载 embedding 模型到 hf_cache/
-#    （模型 192 MB，避免容器内首次启动时再下载）
+# 1. 首次使用前：本地下载模型到 hf_cache/
+#    embedding 模型 192 MB + reranker 模型 3.36 GB
 #    注意：必须指定 cache_dir，否则默认写到 ~/.cache/huggingface，
 #    容器 volume 挂载的 ./hf_cache/ 会是空的
+
+# 1a. embedding 模型
 python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-small-zh-v1.5', cache_dir='hf_cache/hub')"
+
+# 1b. reranker 模型
+python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-reranker-base', cache_dir='hf_cache/hub')"
 
 # 2. 构建并启动（首次约 5~10 分钟）
 docker compose up --build -d
@@ -180,7 +189,7 @@ MYSQL_PASSWORD=your_mysql_password
 
 ## RAG 评估
 
-构建 30 个测试项，四个指标对比：
+构建 30 个测试项，5 种策略对比：
 
 | 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
 |---|---|---|---|---|
@@ -188,23 +197,17 @@ MYSQL_PASSWORD=your_mysql_password
 | MMR | 100% | 0.83 | 0.97 | 1.43 |
 | MMR + 按来源去重 | 100% | 0.77 | 0.97 | **1.57** |
 | 混合检索（向量+BM25+RRF） | 96.7% | 0.86 | 0.94 | 1.30 |
+| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
 | 随机基线 | **84.1%** | — | — | — |
 
 **关键发现**：
-- 混合检索带距离阈值降级，`MAX_DISTANCE=1.0` 会拒答 1 条正样本（召回 96.7%）。这是**有意取舍**——用 1 条漏答换 5.8 个百分点的幻觉率降低。详见下方"阈值标定"小节
-- 相似度/MMR 系列不带降级，召回率都是 100%
-- 精确率和多样性呈 trade-off：追求精确用相似度，需要多角度用 MMR+去重
-- MRR 四种策略都在 0.94 以上，Top-1 都很准
-- 早期实验发现等权 RRF 反而比纯向量差（97%），加权后（向量 0.7 / BM25 0.3）恢复到 100%
+- **Rerank 显著提升精确率和 MRR**：精确率 0.86 → 0.90（+0.04），MRR 0.94 → 0.97（+0.03）
+- Rerank 不解决召回问题（召回率保持 96.7%），只优化排序质量
+- **Rerank 收益被语料规模压制**：只有 2 文档 / 102 chunk，天花板效应明显
+- 混合检索带降级（`MAX_DISTANCE=1.0`），拒答 1 条正样本，是有意取舍（详见"阈值标定"）
 - 随机基线召回率 84.1%，说明当前 30 条样本的判别力有限（差 15.9 个点）
 
-> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线）。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
-
-运行评估：
-
-```bash
-python eval/eval_retrieval.py
-```
+> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线 + Rerank）。首次跑会加载 Reranker 模型（10~20 秒）。
 
 ## 阈值标定
 
@@ -241,6 +244,8 @@ python eval/calibrate_distance.py
 - **Agent 编排**：LangChain 1.4 + LangGraph 1.2
 - **模型**：DeepSeek（OpenAI 兼容协议）
 - **工具协议**：MCP（FastMCP 3.4.8）
+- **Embedding**：bge-small-zh-v1.5（512 维，双塔）
+- **Rerank**：bge-reranker-base（CrossEncoder，交叉编码器）
 - **检索**：sentence-transformers + FAISS + BM25 + 加权 RRF（`rag_core/search.py` 公共模块）
 - **降级**：向量距离阈值（标定 1.0）
 - **记忆持久化**：AsyncSqliteSaver（生产可换 PostgresSaver）
@@ -261,6 +266,7 @@ python eval/calibrate_distance.py
 | 混合检索加权 RRF | 等权 RRF 实测反而比纯向量差（97%） |
 | 抽公共 `hybrid_search` 到 `rag_core/` | 服务端和评估脚本共用一份代码，保证"评估跑的就是部署的" |
 | `MAX_DISTANCE` 标定为 1.0 | 通过正负样本距离分布 + PR 曲线找到 P/R 平衡点，幻觉率从 9.1% 降到 3.3% |
+| **两阶段检索（召回 + Rerank）** | **粗排快（双塔）+ 精排准（交叉编码器），精确率 0.86 → 0.90** |
 | Docker 多阶段构建 | builder 阶段装编译器，运行时不带，镜像从 3.51 GB 降到 2.42 GB |
 | CPU 版 torch | 项目只用 bge-small 做 embedding，CPU 毫秒级；下载量从 5 GB 降到 600 MB |
 | 模型缓存 volume 挂载 | 模型下载移出构建期，避免网络超时；重建不重下 |
@@ -273,7 +279,7 @@ python eval/calibrate_distance.py
 - `save_conversation` 每次请求新建 MySQL 连接，无连接池
 - 评估是**文档级召回**而非 chunk 级，样本 30 条偏少，且缺端到端指标
 - 流式状态机用布尔变量表达，边界情况可能出错
-- 未实现 Rerank 精排
+- **Rerank 收益被语料规模压制**：只有 2 文档 / 102 chunk，提升空间有限（扩到 500+ chunk 才能发挥）
 
 ## 学习路径
 
