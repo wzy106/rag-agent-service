@@ -2,11 +2,11 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
-> 最后更新：2026-10-11（新增 Rerank 精排：精确率 0.86 → 0.90）
+> 最后更新：2026-10-11（语料 2→96 篇，测试集 30→249 条，随机基线 84.1%→3.5%）
 
 ## 一、项目简介（30 秒版本）
 
-基于 LangGraph + MCP + RAG 的企业级 Agent 服务，用 FastAPI 提供 HTTP 接口，支持 SSE 流式输出，Docker 容器化部署。检索用"混合检索 + Rerank"两阶段 pipeline。
+基于 LangGraph + MCP + RAG 的企业级 Agent 服务，用 FastAPI 提供 HTTP 接口，支持 SSE 流式输出，Docker 容器化部署。检索用"混合检索 + Rerank"两阶段 pipeline，知识库 96 篇文档 / 550 chunk，测试集 249 条。
 
 ## 二、架构图
 
@@ -44,13 +44,15 @@ FastAPI（api_agent.py）
     │       ↓                           │
     │  Rerank 精排 Top-3                │
     │  （bge-reranker-base, CrossEncoder）│
-    │       ↓                           │
-    │  降级：距离超阈值 → 返回"没找到"    │
     └─────────────────────────────────┘
                    ↓
     检索结果返回给 Agent（循环第 ④ 步）
                    ↓ SSE 流式返回
 客户端
+
+知识库：
+- 96 篇 markdown 文档 / 550 chunk
+- 分 5 个子目录：langchain / notes / notes_interview / readme / stories
 
 记忆层：
 - LangGraph checkpointer 按 thread_id 管状态（唯一真相源）
@@ -84,10 +86,10 @@ FastAPI（api_agent.py）
 ## 四、核心功能
 
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启/容器重建都不丢
-- RAG 检索增强（本地 embedding + FAISS 向量库）
+- RAG 检索增强（本地 embedding + FAISS 向量库，96 篇 / 550 chunk）
 - **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
 - 混合检索（向量 + BM25 + 加权 RRF）
-- **Rerank 精排**（bge-reranker-base，精确率 0.86 → 0.90）
+- **Rerank 精排**（bge-reranker-base，召回率 +6.5%）
 - 降级策略（距离阈值标定 1.0，避免幻觉）
 - MCP 工具解耦（Agent 和工具分进程）
 - SSE 流式输出（打字机效果）
@@ -98,6 +100,7 @@ FastAPI（api_agent.py）
 - FAISS 索引持久化（避免重复 embedding）
 - MySQL 持久化对话历史（展示层）
 - RAG 评估（召回率 + 精确率 + MRR + 多样性 + 随机基线）
+- **测试集自动生成**（脚本批量调用 DeepSeek API）
 - **阈值标定**（正负样本距离分布 + PR 曲线）
 - **Docker 多阶段构建**（镜像从 3.51 GB 降到 2.42 GB）
 - **CPU 版 torch**（下载量从 5 GB 降到 600 MB）
@@ -111,13 +114,17 @@ FastAPI（api_agent.py）
 
 ```python
 docs_dir = Path(__file__).resolve().parent.parent / "docs"
-for md_file in docs_dir.glob("*.md"):
+documents = []
+# rglob 递归扫描子目录
+for md_file in docs_dir.rglob("*.md"):
     text = md_file.read_text(encoding="utf-8")
-    documents.append(Document(page_content=text, metadata={"source": md_file.name}))
+    rel_path = md_file.relative_to(docs_dir).as_posix()
+    documents.append(Document(page_content=text, metadata={"source": rel_path}))
 ```
 
-- 加载 `docs/` 下所有 Markdown 文件
-- 每个文件转成 `Document` 对象，带 `source` 元数据
+- 加载 `docs/` 下**所有子目录**的 Markdown 文件（用 `rglob` 递归）
+- **`source` 用相对路径**（如 `notes_interview/q01_xxx.md`），避免不同子目录同名文件冲突
+- 当前知识库：96 篇 markdown，切成 550 块
 
 ### 2. 文档切分
 
@@ -134,7 +141,6 @@ chunks = splitter.split_documents(documents)
 - `chunk_overlap=50`：相邻块重叠 50 字符，防止关键信息被切断
 - `separators`：按优先级尝试切分，先段落再句子最后字符
 - 中文场景专门加了 `。！？` 分隔符
-- 当前知识库：2 个 Markdown 文件（真实笔记），切成 102 块
 
 ### 3. Embedding
 
@@ -156,8 +162,6 @@ class LocalEmbeddings(Embeddings):
 
 ### 4. 向量库 + 持久化
 
-> **变更（2026-10-08）**：`faiss_index/` 已从 `.gitignore` 移除，索引文件（index.faiss 204KB + index.pkl 44KB）已提交进 Git。别人 clone 后可直接构建，无需先跑建索引脚本。
-
 ```python
 INDEX_DIR = Path(__file__).resolve().parent.parent / "faiss_index"
 
@@ -170,7 +174,7 @@ else:
 
 - 首次启动：构建索引并保存到磁盘（`index.faiss` + `index.pkl`）
 - 后续启动：直接从磁盘加载，避免重复 embedding
-- 索引文件提交进 Git（248 KB，很小）
+- 索引文件提交进 Git（550 chunk 约 1~2 MB）
 
 ### 5. 检索策略
 
@@ -182,7 +186,7 @@ else:
 results = vectorstore.similarity_search(query, k=3)
 ```
 
-最基础的余弦相似度检索。
+最基础的余弦相似度检索。**在 249 条测试集上召回率 56.2%。**
 
 #### 5.2 MMR 检索
 
@@ -196,22 +200,13 @@ results = vectorstore.max_marginal_relevance_search(query, k=3, fetch_k=10)
 - 同一文档里差异大的 chunk，MMR 也可能都选
 - 想保证"Top-3 来自不同文档"，需要额外按文档去重
 
+**在 249 条测试集上的表现**：召回率只有 **43.0%**——在"精确匹配"任务上吃亏，但多样性最高（2.81）。
+
 #### 5.3 混合检索（加权 RRF）
 
 **为什么需要**：纯向量检索对关键词不敏感，用户用口语化表达时和文档术语之间有语义鸿沟。
 
-**BM25 索引构建**：
-
-```python
-import jieba
-from rank_bm25 import BM25Okapi
-
-all_docs = list(vectorstore.docstore._dict.values())
-tokenized_corpus = [list(jieba.cut(doc.page_content)) for doc in all_docs]
-bm25 = BM25Okapi(tokenized_corpus)
-```
-
-**加权 RRF 合并**：
+**实现**（`rag_core/search.py`）：
 
 ```python
 def hybrid_search(query, vectorstore, bm25, all_docs, k=3, rrf_k=60,
@@ -268,7 +263,9 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 - 加权（0.7/0.3）：100% 召回率
 - **向量检索更可靠，给它更高权重**
 
-#### 5.4 Rerank 精排（2026-10-11 新增）
+**在 249 条测试集上的表现**：混合检索召回率 **60.2%** > 纯相似度 56.2%（**+4%**）。
+
+#### 5.4 Rerank 精排
 
 **为什么需要**：混合检索是"双塔 + 关键词"的粗排，速度快但精度有限。Rerank 用交叉编码器把 Top-20 精排到 Top-3，精度更高。
 
@@ -308,18 +305,19 @@ def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
     return rerank(query, candidates, top_k=final_k)
 ```
 
-**效果**（30 条测试项）：
+**效果**（249 条测试项，覆盖 83 篇文档）：
 
 | 策略 | 召回率 | 精确率 | MRR | 多样性 |
 |---|---|---|---|---|
-| 混合检索 | 96.7% | 0.86 | 0.94 | 1.30 |
-| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
+| 混合检索 | 60.2% | 0.27 | 0.47 | 2.59 |
+| **混合检索 + Rerank** | **66.7%** | **0.29** | **0.54** | 2.59 |
 
-- 精确率 **+0.04**，MRR **+0.03**
-- 召回率不变（Rerank 不解决"召回阶段漏掉"的问题）
-- 多样性略降（Rerank 偏向最相关，牺牲多样性）——**符合预期**
+- 召回率 **+6.5%**，MRR **+0.07**
+- **Rerank 提升的主要是召回率**——混合检索直接返回 Top-3 会漏掉"相关但排名 4~20"的 chunk，Rerank 拿 Top-20 重新排，有机会把关键 chunk 顶上来
 
-**懒加载设计**：Reranker 模型 3.36 GB，加载要 10~20 秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，之后复用。**不拖慢服务启动**。
+**懒加载设计**：Reranker 模型 3.36 GB，加载要 10~20 秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**。
+
+**性能问题**：249 条查询 × 20 候选 = 4980 次推理，CPU 上单次 50~100 ms，总耗时 **4~8 分钟**。高并发场景需要优化（更小模型 / GPU / 缓存）。
 
 #### 5.5 降级策略（避免幻觉）
 
@@ -332,17 +330,6 @@ def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
 # Precision=0.967, Recall=0.967, F1=0.967
 # 相比原值 1.1（P=0.909），幻觉率从 9.1% 降到 3.3%
 MAX_DISTANCE = 1.0
-```
-
-`search_knowledge` 工具处理空结果：
-
-```python
-@mcp.tool
-def search_knowledge(query: str) -> str:
-    results = hybrid_search_with_rerank(query, ..., recall_k=20, final_k=3, verbose=True)
-    if not results:
-        return "知识库中没有找到相关信息。"
-    return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
 ```
 
 **阈值标定实验（2026-10-10）**：
@@ -408,7 +395,9 @@ def search_knowledge(query: str) -> str:
 | **checkpoints.db 无 volume** | DB 存在容器内部，`docker compose down` 后记忆全丢 | compose 加 `./data:/app/rag_api/data`，代码用 `DATA_DIR` 环境变量 |
 | **评估脚本和服务端代码分叉** | 两份 `hybrid_search`，参数还不一样 | 抽到 `rag_core/search.py`，两边都 import |
 | **MAX_DISTANCE 拍脑袋定** | 原值 1.1 是跑了几条样例的约数，无统计支撑 | `eval/calibrate_distance.py` 标定 → 1.0（P=0.967, R=0.967） |
-| **Rerank 收益被语料规模压制** | 只有 2 文档 / 102 chunk，天花板效应 | 记录此局限，下一步扩语料到 500+ chunk |
+| **Rerank 收益被语料规模压制** | 旧语料只有 2 篇 102 chunk，天花板效应 | 扩语料到 96 篇 550 chunk，Rerank 增益从 +0.04 → +6.5% 召回 |
+| **测试集太小导致判别力不足** | 30 条测试项，随机基线 84.1%，判别空间只有 15.9 个点 | 扩到 249 条 + 96 篇文档，随机基线降到 3.5% |
+| **拆笔记文件 chunk 太集中** | `notes/07` 一个文件 74 chunks（含 25 道面试题） | 按 `###` 拆成 25 个独立文件，判别力提升 |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -448,7 +437,7 @@ def search_knowledge(query: str) -> str:
 
 **加分项（精排）**：
 - 混合检索的 Top-20 用 Reranker 精排，把不相关的候选挤下去
-- 精确率 0.86 → 0.90
+- 召回率 60.2% → 66.7%
 
 ### 4. InMemorySaver 和 PostgresSaver 区别？
 
@@ -485,7 +474,7 @@ def search_knowledge(query: str) -> str:
 - 加 Redis 限流（incr + expire）
 - 多 worker 部署（uvicorn --workers N 或 gunicorn）
 - 反向代理（Nginx）分担负载
-- **Reranker 是瓶颈**：单条 query 精排约 100~300 ms（CPU 上），高并发可以换更小的 Reranker 或加缓存
+- **Reranker 是瓶颈**：单条 query 精排约 50~100 ms（CPU），249 条需 4~8 分钟；高并发可换更小 Reranker 或加缓存
 
 ### 8. 文档切分参数怎么定？
 
@@ -508,6 +497,10 @@ MMR = λ × Sim(query, chunk) - (1-λ) × max(Sim(chunk, 已选chunk))
 - 同一个文档里的两个差异大的 chunk，MMR 也会都选
 - 想保证"Top-3 来自不同文档"，需要额外按文档去重
 
+**在 249 条测试集上的表现**：
+- MMR 召回率只有 43%（低于相似度 56.2%）——**在"精确匹配"任务上吃亏**
+- 多样性 2.81（高于相似度 2.66）—— **多样性导向是对的**
+
 ### 10. 混合检索是什么？
 
 **全称**：Hybrid Search。
@@ -527,10 +520,9 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 - 如果 BM25 判断错，错误会被放大
 - 用加权 RRF 让更可靠的一路权重更高（我用向量 0.7 / BM25 0.3）
 
-**为什么需要**：
-- 纯向量检索对关键词不敏感
-- 用户用口语化表达时，和文档术语有语义鸿沟
-- BM25 补上关键词匹配能力
+**在 249 条测试集上的表现**：
+- 混合检索 60.2% > 纯相似度 56.2%（**+4%**）
+- 说明 BM25 补的关键词匹配确实有用
 
 ### 11. 怎么防止 Agent 死循环？
 
@@ -538,13 +530,6 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 
 1. **`recursion_limit=10`**：Agent 最多循环 10 次，超过抛异常
 2. **`max_tokens=2000`**：单次输出最多 2000 token
-
-**在代码里怎么用**：
-
-```python
-config = {"recursion_limit": RECURSION_LIMIT}
-result = await agent.ainvoke({...}, config=config)
-```
 
 **触发后怎么办**：异常被 `try/except` 捕获，以 SSE 格式返回友好错误，服务不崩。
 
@@ -565,11 +550,7 @@ async def lifespan(app: FastAPI):
     data_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = str(data_dir / "checkpoints.db")
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
-        agent = create_agent(
-            model, tools=tools,
-            checkpointer=saver,
-            system_prompt="..."
-        )
+        agent = create_agent(model, tools=tools, checkpointer=saver, system_prompt="...")
         yield
 
 # 调用
@@ -589,15 +570,11 @@ result = await agent.ainvoke(
 | `thread_id` | 区分不同会话，相同 ID 共享历史 |
 | `DATA_DIR` | 决定 DB 路径，本地/容器两套值 |
 
-**只需要传当前这一轮的消息**，Agent 会自动从 checkpointer 加载历史。
-
 **测试验证**：
 1. `test_001` 问"MMR 是什么？" → 正常回答
 2. **`docker compose down` 完全销毁容器**
 3. `docker compose up -d` 重建
 4. `test_001` 问"它和普通相似度检索有什么区别？" → 仍能理解"它"指 MMR ✅
-
-**生产优化**：AsyncSqliteSaver 换 `PostgresSaver`，支持多实例共享。
 
 **面试话术**：
 > "我的记忆用 LangGraph 的 checkpointer 做唯一真相源，持久化用 AsyncSqliteSaver（生产环境会换 PostgresSaver）。每次请求只传当前这一轮的消息，Agent 自动从 checkpointer 加载该 thread_id 的历史。之前我试过手动从 MySQL 加载历史拼进 messages，但发现和 checkpointer 的 state 会打架——消息格式混用、历史可能重复累积。后来统一到 checkpointer，MySQL 只做展示层给 /history 接口用。另外我把 checkpoints.db 挂到宿主机的 ./data/，这样 docker compose down 后容器重建也不丢。"
@@ -630,19 +607,19 @@ result = await agent.ainvoke(
 | 多样性 | 平均（Top-K 里不同文档数） | 结果覆盖多少不同来源 |
 | 随机基线 | 1 - C(N-n,k)/C(N,k) | 从 N 个 chunk 里随机抽 k 个，命中期望 source 的概率 |
 
-**实测数据**（30 个测试项）：
+**实测数据**（249 个测试项，覆盖 83 篇文档）：
 
 | 策略 | 召回率 | 精确率 | MRR | 多样性 |
 |---|---|---|---|---|
-| 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
-| MMR | 100% | 0.83 | 0.97 | 1.43 |
-| MMR + 去重 | 100% | 0.77 | 0.97 | **1.57** |
-| 混合检索 | 96.7% | 0.86 | 0.94 | 1.30 |
-| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
-| **随机基线** | **84.1%** | — | — | — |
+| 普通相似度 | 56.2% | 0.25 | 0.42 | 2.66 |
+| MMR | 43.0% | 0.17 | 0.36 | 2.81 |
+| MMR + 去重 | 46.6% | 0.16 | 0.37 | **3.00** |
+| 混合检索 | 60.2% | 0.27 | 0.47 | 2.59 |
+| **混合检索 + Rerank** | **66.7%** | **0.29** | **0.54** | 2.59 |
+| **随机基线** | **3.5%** | — | — | — |
 
 **面试话术**：
-> "我评估 RAG 用了四个指标 + 随机基线。召回率看'该找的有没有找到'，精确率看'找到的有多少是对的'，MRR 看'第一个正确结果排多前'，多样性看'结果覆盖多少不同文档'。随机基线用组合公式精确计算——从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。加了 Rerank 后精确率从 0.86 提到 0.90，MRR 从 0.94 提到 0.97。但 Rerank 收益被语料规模压制——只有 2 文档 102 chunk，下一步要扩语料到 500+ 才能发挥全部威力。"
+> "我评估 RAG 用了四个指标 + 随机基线。随机基线用组合公式精确计算——从 550 个 chunk 里随机抽 3 个，命中期望 source 的概率是 3.5%。这里有个关键：**早期版本语料只有 2 篇文档、测试集只有 30 条，随机基线高达 84.1%，判别空间只有 15.9 个点**——Rerank 的提升被天花板效应压制，只有 +0.04 精确率。**扩语料到 96 篇、测试集到 249 条后**，随机基线降到 3.5%，判别空间扩大到 63.2 个点，**Rerank 的增益变成召回率 +6.5%、MRR +0.07**——这才是真实的增益。"
 
 ### 15. 错误信息怎么处理？
 
@@ -666,21 +643,14 @@ def friendly_error(e: Exception) -> str:
 
 **为什么不用子串匹配**：`"rate" in msg` 会误匹配 `generate`、`operate`、`separate` 等词，导致错误分类。
 
-**服务端**：完整异常打日志，方便排查
-**客户端**：只看到友好提示，不泄漏内部信息
-
-**面试话术**：
-> "服务端用完整的 `str(e)` 打日志，客户端只返回 `friendly_error` 映射后的友好提示。因为 `str(e)` 可能包含 API key、文件路径、SQL 结构等内部信息，生产环境不能直接暴露给客户端。我用异常类型 + HTTP 状态码判断，而不是子串匹配——因为 `rate` 会误匹配 `generate`。"
-
 ### 16. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - 加 API Key 鉴权和限流
 - 加 LangSmith 可观测性
 - 写单元测试和集成测试
-- 文档库扩充到几百个文件，让 Rerank 和不同检索策略的差异更明显
-- 加 chunk 级评估（不只是文档级）
-- 加端到端评估（LLM-as-judge）
+- **评估升级到 chunk 级标注**（现在是文档级）
+- **加端到端评估**（LLM-as-judge 或人工标注）
 
 ### 17. Docker 构建失败怎么排查？
 
@@ -704,9 +674,6 @@ failed to solve: Unavailable: error reading from server: EOF
 2. Docker 数据迁到 D 盘（Settings → Disk image location）
 3. C 盘从 10 GB → 65 GB 可用
 
-**面试话术**：
-> "Docker 构建报 `unpigz corrupted` 这种错误，第一反应要查磁盘空间，不是改代码。我当时 C 盘 0 字节，Docker 在 unpacking 阶段写不进去才报的这个错。后来把 Docker 数据从 C 盘迁到 D 盘，问题解决。"
-
 ### 18. 为什么 pip 突然开始超时？
 
 **触发点**：我改 Dockerfile 时，pip 命令加了 `--prefix=/install`，Docker 层缓存失效，必须重新下载所有依赖。
@@ -719,9 +686,6 @@ failed to solve: Unavailable: error reading from server: EOF
 - 换阿里云源（比清华稳定）
 - 加 `--timeout 300 --retries 10`
 - **根本解法**：requirements.txt 加 `--extra-index-url https://download.pytorch.org/whl/cpu`，用 CPU 版 torch，下载量从 5 GB → 600 MB
-
-**面试话术**：
-> "pip 超时有时候不是网络问题，是缓存失效。我改了 pip 命令的一个参数，导致 Docker 层缓存失效，本来命中的缓存都要重新下载 5 GB 的 CUDA 全家桶。后来用 CPU 版 torch 把下载量砍到 600 MB。"
 
 ### 19. Windows 下载的 wheel 能给 Linux 容器用吗？
 
@@ -757,13 +721,11 @@ COPY --from=builder /install /usr/local   # 只拷依赖，不拷编译器
 - 减少攻击面（没有 gcc/g++ 可被利用）
 - 镜像更小（3.51 GB → 2.42 GB）
 
-**代价**：构建时间稍长（多一次 stage），但镜像拉取/推送更快。
-
 ### 21. Docker 容器重建后，LangGraph 的记忆会丢吗？
 
 **会，如果不做持久化。**
 
-`AsyncSqliteSaver` 默认把 `checkpoints.db` 写到容器内部，`docker compose down` 一销毁就全没了。README 里说"服务重启不丢历史"，对**进程重启**成立，对**容器重建**不成立——这是一个很容易忽略的边界。
+`AsyncSqliteSaver` 默认把 `checkpoints.db` 写到容器内部，`docker compose down` 一销毁就全没了。README 里说"服务重启不丢历史"，对**进程重启**成立，对**容器重建**不成立。
 
 **修法**：把 checkpoints 目录挂载到宿主机。
 
@@ -788,14 +750,9 @@ volumes:
 1. 问一个问题
 2. `docker compose down`（完全销毁容器）
 3. `docker compose up -d`
-4. 用代词问（"它和普通相似度有什么区别？"）→ 能理解"它"指上一轮的 MMR ✅
-
-**宿主机 `data/checkpoints.db` 大小会实时变化**，证明写入生效。
+4. 用代词问 → 能理解"它"指上一轮 MMR ✅
 
 **为什么不直接挂载 `./checkpoints.db:/app/rag_api/checkpoints.db`**：如果宿主机文件不存在，Docker 会**创建一个同名目录**挂进去，导致 SQLite 打不开。挂目录比挂文件稳。
-
-**面试话术**：
-> "Docker 化的一个坑是 checkpoints 持久化。`AsyncSqliteSaver` 默认把 DB 写在容器内部，`docker compose down` 就全丢了。我的做法是用 `DATA_DIR` 环境变量决定路径，compose 里把 `./data` 挂到 `/app/rag_api/data`。本地开发 fallback 到 `rag_api/data/`。验证过：`docker compose down` 后 `up -d`，用代词问，Agent 还能回忆起上一轮。"
 
 ### 22. 为什么要让 HF_HOME 三级探测？
 
@@ -817,20 +774,11 @@ def _resolve_hf_home() -> str:
 
 **为什么不只用环境变量**：子进程可能拿不到，本地开发时也常常忘了设。
 
-**面试话术**：
-> "我 Docker 化时把模型下载从构建期移到运行时 volume 挂载。但改完启动容器报 `FileNotFoundError: snapshots 目录不存在`。根因是 MCP Server 硬编码了 HF 缓存路径，而且子进程的环境变量可能不完整。我改成三级探测：环境变量 > 容器默认挂载点 `/root/.cache/huggingface` > 项目内 `hf_cache/`。这样本地和容器都能跑。"
-
 ### 23. 为什么要抽公共 `hybrid_search` 模块？
 
 **问题**：评估脚本和服务端各有一份 `hybrid_search` 实现，参数不一样（评估脚本缺距离降级），所以"评估跑的数字"描述的不是"部署的系统"。
 
 **修法**：抽到 `rag_core/search.py`，服务端和评估脚本都 `from rag_core.search import hybrid_search`。
-
-```python
-# rag_core/search.py
-def hybrid_search(query, vectorstore, bm25, all_docs, k=3, ...):
-    ...
-```
 
 **Dockerfile 也要加 COPY**：
 ```dockerfile
@@ -848,12 +796,8 @@ from rag_core.search import hybrid_search, ...
 
 **收益**：
 - 评估结果真实反映部署行为
-- 改一处，两端生效（比如调 `MAX_DISTANCE` 只需改一处）
+- 改一处，两端生效
 - 面试报的每个数字都能被复现
-- Dockerfile 加了 COPY，容器内也能 import
-
-**面试话术**：
-> "我之前评估脚本和服务端各写了一份 hybrid_search，参数还不一样——评估那份缺距离降级。发现后把检索逻辑抽到 rag_core/search.py，两边都 import，Dockerfile 也加了 COPY。这样评估脚本跑 python eval_retrieval.py 得到的数字就是部署系统的真实表现。"
 
 ### 24. `MAX_DISTANCE` 阈值怎么定的？
 
@@ -878,11 +822,6 @@ from rag_core.search import hybrid_search, ...
 - 用 3.3% 的漏答换幻觉率**减半**（9.1% → 3.3%）
 - 两个阈值 F1 一样（0.967），但业务上 1.00 更稳
 
-**距离分布（图见 `eval/output/distance_distribution.png`）**：
-- 正样本 0.375 ~ 1.059（中位数 0.698）
-- 负样本 0.854 ~ 1.468（中位数 1.271）
-- 重叠区 [0.854, 1.059]，宽 0.206
-
 **产出**：
 - `eval/calibrate_distance.py`（标定脚本）
 - `eval/negatives.json`（25 条负样本）
@@ -892,7 +831,7 @@ from rag_core.search import hybrid_search, ...
 **面试话术**：
 > "MAX_DISTANCE=1.0 不是拍脑袋定的。我构造了 30 条正样本和 25 条负样本，对每条跑 best_distance，画分布直方图看分离点，再扫阈值从 0.5 到 1.5 画 PR 曲线。F1 最大化的点是 1.06，但我取了 1.00——因为这个点上精确率还能保持 96.7%，幻觉率从 9.1% 降到 3.3%，代价只是 3.3% 的漏答。RAG 场景下用户宁可听到'不知道'也不要被编造。标定脚本和结果图都在仓库里，可以复现。"
 
-### 25. 为什么要加 Rerank？（2026-10-11 新增）
+### 25. 为什么要加 Rerank？
 
 **问题**：混合检索（向量 + BM25 + RRF）是"双塔 + 关键词"的粗排——快但精度有限。Top-3 里可能混进一些语义上相关但实际帮助不大的 chunk。
 
@@ -911,40 +850,31 @@ from rag_core.search import hybrid_search, ...
 1. **粗排**：混合检索召回 Top-20（保证召回率）
 2. **精排**：Reranker 打分保留 Top-3（保证精确率）
 
-**为什么不能只用 Reranker**：
-- Reranker 要对每条 (query, doc) 跑一次模型
-- 102 个 chunk → 102 次推理，100 ms × 102 = 10 秒/查询——太慢
-- 所以先用双塔快速筛到 20 条，再用 Reranker 精排
+**为什么不能只用 Reranker**：要对每条 (query, doc) 跑一次模型。550 个 chunk → 550 次推理，100 ms × 550 = 55 秒/查询——太慢。所以先用双塔快速筛到 20 条，再用 Reranker 精排。
 
-**实现要点**：
-- **懒加载**：Reranker 模型 3.36 GB，加载 10~20 秒。用 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**
-- **`CrossEncoder`**：sentence-transformers 的封装，输入 `[(query, doc), ...]`，输出分数数组
-
-**效果**（30 条测试项）：
+**效果**（249 条测试项，覆盖 83 篇文档）：
 
 | 策略 | 召回率 | 精确率 | MRR | 多样性 |
 |---|---|---|---|---|
-| 混合检索 | 96.7% | 0.86 | 0.94 | 1.30 |
-| 混合检索 + Rerank | 96.7% | **0.90** | **0.97** | 1.17 |
+| 混合检索 | 60.2% | 0.27 | 0.47 | 2.59 |
+| **混合检索 + Rerank** | **66.7%** | **0.29** | **0.54** | 2.59 |
 
-- 精确率 **+0.04**
-- MRR **+0.03**
-- 召回率不变（Rerank 不解决"召回阶段漏掉"的问题）
-- 多样性略降（Rerank 偏向最相关）
+- 召回率 **+6.5%**
+- MRR **+0.07**
+- **Rerank 提升的主要是召回率**（把 Top-20 里被埋没的相关 chunk 顶上来）
 
 **诚实的局限**：
-- Rerank 收益被语料规模压制——只有 2 文档 102 chunk，判别空间有限
-- 扩到 500+ chunk 才能发挥 Reranker 全部威力
-- 面试时**主动说这个局限**，比"Rerank 提升很大"更可信
+- 249 条查询 × 20 候选 = 4980 次推理，CPU 上 50~100 ms/次，总耗时 **4~8 分钟**
+- 高并发场景需要优化（更小模型 / GPU / 缓存）
 
 **面试话术**：
-> "我加了两阶段检索：混合检索召回 Top-20，用 bge-reranker-base 交叉编码器精排 Top-3。精确率从 0.86 提到 0.90，MRR 从 0.94 提到 0.97。Reranker 是懒加载的——第一次调用才加载 3.36 GB 模型，不拖慢服务启动。这里有个诚实的局限：Rerank 收益被语料规模压制，只有 2 文档 102 chunk，判别空间有限。下一步扩到 500+ chunk 才能发挥全部威力。"
+> "我加了两阶段检索：混合检索召回 Top-20，用 bge-reranker-base 交叉编码器精排 Top-3。在 249 条测试集上召回率从 60.2% 提到 66.7%，MRR 从 0.47 提到 0.54。Reranker 是懒加载的——第一次调用才加载 3.36 GB 模型，不拖慢服务启动。这里有个诚实的局限：Rerank 单次推理 CPU 上 50~100 ms，249 条查询需要 4~8 分钟，高并发场景需要优化。"
 
 ## 八、项目数据（面试时能报的具体数字）
 
 - 工具数量：1 个（search_knowledge）
-- 知识库文档数：2 个 Markdown 文件（真实笔记）
-- 切分后块数：102 块
+- **知识库文档数：96 篇 markdown（5 个子目录）**
+- **切分后块数：550 块**
 - Embedding 模型：BAAI/bge-small-zh-v1.5（512 维，双塔，192 MB）
 - **Rerank 模型：BAAI/bge-reranker-base（CrossEncoder，3.36 GB）**
 - 向量库：FAISS（本地持久化）
@@ -955,18 +885,20 @@ from rag_core.search import hybrid_search, ...
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
 - 展示层：MySQL（表 conversations）
-- 评估指标：召回率 / 精确率 / MRR / 多样性 / 随机基线（30 个测试项）
+- **评估集：249 个测试项（自动生成），覆盖 83 篇文档**
+- **随机检索基线：3.5%**（判别空间 63.2 个点）
 - 首次 Docker 构建耗时：约 19 分钟（CUDA）→ **5~10 分钟**（CPU）
 - 单次请求耗时：2~3 秒（首次含 Reranker 加载 10~20 秒）
 - 镜像大小：10.4 GB → **2.42 GB**（content 519 MB）
 - Docker 数据位置：`D:\Docker`（55.73 GB）
 - C 盘可用空间：10.20 GB → **65.25 GB**
 - pip 下载量：3~5 GB（CUDA）→ **~600 MB**（CPU）
-- FAISS 索引：已提交 Git（248 KB）
+- FAISS 索引：已提交 Git（550 chunk 约 1~2 MB）
 - checkpoints 持久化：`./data/checkpoints.db`（volume 挂载，容器重建不丢）
 - data/ 目录：`.gitignore` 已忽略
 - 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用）
-- 评估可复现：`python eval/eval_retrieval.py` 一条命令跑出所有数字（含 84.1% 随机基线 + Rerank 对比）
+- 评估可复现：`python eval/eval_retrieval.py` 一条命令跑出所有数字
+- 测试集自动生成：`python scripts/generate_testset.py`（成本约 ¥0.2）
 - 阈值标定：`python eval/calibrate_distance.py`（正样本 30 + 负样本 25）
 
 ## 九、可演示的操作
@@ -980,10 +912,11 @@ from rag_core.search import hybrid_search, ...
 7. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
 8. 用浏览器打开 client.html，看打字机效果
 9. 展示 Docker 一键启动：`docker compose up -d`
-10. **展示评估可复现**：`python eval/eval_retrieval.py` → 输出 5 种策略 + 84.1% 随机基线
+10. **展示评估可复现**：`python eval/eval_retrieval.py` → 输出 5 种策略 + 3.5% 随机基线
 11. **展示阈值标定**：`python eval/calibrate_distance.py` → 输出正负样本距离分布 + PR 曲线
-12. **展示两阶段检索日志**：`docker logs agent-api` → 看到 `[Rerank] 候选 20 条 → Top-3`
-13. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+12. **展示测试集自动生成**：`python scripts/generate_testset.py` → 从 96 篇文档生成 249 条测试项
+13. **展示两阶段检索日志**：`docker logs agent-api` → 看到 `[Rerank] 候选 20 条 → Top-3`
+14. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -1019,11 +952,10 @@ from rag_core.search import hybrid_search, ...
 | bge-reranker-large | 560M | 2.2 GB | 效果更好，慢 2 倍 |
 | bge-reranker-v2-m3 | 568M | 2.3 GB | 最新，多语言 |
 | Cohere Rerank | 闭源 | API | 需付费，无需部署 |
-| Jina Reranker | - | - | 长上下文优势 |
 
 **bge-reranker-base 的选择理由**：
 - 中英双语都支持
-- 3 GB 大小，CPU 上单条推理 100~300 ms
+- 3 GB 大小，CPU 上单条推理 50~100 ms
 - 有开源权重，完全离线
 
 ### Rerank 是什么
@@ -1377,9 +1309,53 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 
 ### 评估方法
 
-构建 30 个测试项的测试集，每个标注期望命中的文档。
-问题故意不包含文档关键词，测试语义检索能力。
-包含单文档问题和多文档问题（一个 query 对应多个相关文档）。
+构建 **249 条测试项**（覆盖 83 篇文档），测试集用脚本自动生成：
+1. 遍历所有 chunk，按 source 分组
+2. 每篇文档挑 2 个最长 chunk
+3. 调 DeepSeek API 生成 3 个问题
+4. 标注 `expected_sources = 该文档的 source`
+
+**关键设计**：
+- 问题口语化、角度多样、能被对应文档回答
+- 13 篇极短文档（chunk < 2）被跳过
+- 平均每篇 3 题
+
+### 测试集自动生成脚本
+
+`scripts/generate_testset.py`：
+
+```python
+async def generate_questions(source: str, chunks: list, sem: asyncio.Semaphore):
+    async with sem:
+        # 挑两个最长 chunk
+        sorted_chunks = sorted(chunks, key=lambda c: len(c.page_content), reverse=True)
+        picked = sorted_chunks[:CHUNKS_PER_DOC]
+        if len(picked) < 2:
+            return None
+
+        prompt = PROMPT_TEMPLATE.format(
+            chunk1=picked[0].page_content[:800],
+            chunk2=picked[1].page_content[:800],
+        )
+        resp = await client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=500,
+        )
+        content = resp.choices[0].message.content.strip()
+        # 去掉可能的 ```json ``` 包裹
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+        questions = json.loads(content)
+        return {"source": source, "questions": questions[:QUESTIONS_PER_DOC]}
+```
+
+**成本**：约 ¥0.2（96 篇 × 1 次 API 调用）
+**时间**：并发 5，约 1~2 分钟
 
 ### 评估脚本核心
 
@@ -1444,40 +1420,52 @@ def random_baseline(test_set, all_docs, k=3):
     return total / len(test_set)
 ```
 
-### 评估结果（当前 2 个文档 / 102 chunk）
+### 评估结果（96 篇文档 / 550 chunk / 249 测试项）
 
 | 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
 |---|---|---|---|---|
-| 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
-| MMR | 100% | 0.83 | 0.97 | 1.43 |
-| MMR + 按来源去重 | 100% | 0.77 | 0.97 | **1.57** |
-| 混合检索（带降级 1.0） | 96.7% | 0.86 | 0.94 | 1.30 |
-| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
-| 随机基线 | **84.1%** | — | — | — |
+| 普通相似度 | 56.2% | 0.25 | 0.42 | 2.66 |
+| MMR | 43.0% | 0.17 | 0.36 | 2.81 |
+| MMR + 按来源去重 | 46.6% | 0.16 | 0.37 | **3.00** |
+| 混合检索（带降级 1.0） | 60.2% | 0.27 | 0.47 | 2.59 |
+| **混合检索 + Rerank** | **66.7%** | **0.29** | **0.54** | 2.59 |
+| 随机基线 | **3.5%** | — | — | — |
 
-> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线 + Rerank）。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
+> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
 
 ### 关键发现
 
-**1. Rerank 是精确率的最后一块拼图**
+**1. 随机基线从 84.1% 降到 3.5%——判别空间 ×4**
 
-- 混合检索精确率 0.86 → Rerank 后 0.90
-- MRR 0.94 → 0.97
-- **但召回率不变**（Rerank 只重排，不召回）
+- 旧语料：2 篇文档 / 102 chunk / 30 测试项 → 随机基线 84.1%，判别空间 15.9 个点
+- 新语料：96 篇文档 / 550 chunk / 249 测试项 → 随机基线 3.5%，判别空间 **63.2 个点**
+- **旧数字全 100% 是"天花板效应"**——测试集太简单，看不出策略差异
 
-**2. Rerank 收益被语料规模压制**
+**2. Rerank 是精确率的最后一块拼图**
 
-- 只有 2 文档 / 102 chunk，判别空间有限
-- 扩到 500+ chunk 才能发挥 Reranker 全部威力
-- **主动承认这个局限**，比夸张提升更可信
+- 混合检索召回率 60.2% → Rerank 后 **66.7%**（+6.5%）
+- MRR 0.47 → **0.54**（+0.07）
+- **主要提升召回率**——Rerank 把 Top-20 里被埋没的相关 chunk 顶上来
 
-**3. 精确率和多样性呈明显 trade-off**
+**3. 混合检索优于纯相似度**
 
-- 相似度/混合检索：精确率高，多样性低
-- MMR + 去重：多样性最高（1.57），精确率最低（0.77）
-- Rerank 进一步压低多样性（1.17）——只选最相关的
+- 60.2% vs 56.2%（**+4%**）
+- 说明 BM25 补的关键词匹配确实有用
 
-**4. 选哪个策略取决于业务**
+**4. MMR 在"精确匹配"任务上吃亏**
+
+- 召回率只有 43%（低于相似度 56.2%）
+- 但多样性最高（2.81）
+- **多样性导向的代价**——选多角度的结果，但可能漏掉最相关的
+
+**5. 精确率和多样性呈明显 trade-off**
+
+| 策略 | 精确率 | 多样性 |
+|---|---|---|
+| 混合检索 + Rerank | 0.29 | 2.59 |
+| MMR + 去重 | 0.16 | **3.00** |
+
+**6. 选哪个策略取决于业务**
 
 | 场景 | 推荐策略 |
 |---|---|
@@ -1485,49 +1473,36 @@ def random_baseline(test_set, all_docs, k=3):
 | 需要多角度（如分析任务） | MMR + 去重 |
 | 平衡 | MMR |
 
-### 早期评估（5 个文档 / 24 chunk）
-
-| 策略 | 召回率 | 平均多样性 |
-|---|---|---|
-| 普通相似度 | 29/30 = 97% | 2.00 |
-| MMR | 28/30 = 93% | 2.50 |
-| MMR + 按来源去重 | — | 3.00 |
-
-**核心结论**：MMR 用 4% 的召回率换取 25% 的多样性提升。
-
 ### 失败案例分析
 
-**案例 1**："怎么让回答一个字一个字显示出来？"
-- 期望：`deployment.md`
-- 实际：`langchain.md`、`rag.md`
+**案例 1**：口语化表达
+- 用户问："怎么让回答一个字一个字显示出来？"
+- 期望文档：`readme/04_启动.md`
+- 实际命中：`notes_interview/q05_流式输出怎么实现的.md`
 - 原因：口语化表达和文档术语有语义鸿沟
 
-**案例 2**："多 Agent 系统怎么保证消息不丢？"
-- 期望：`langgraph.md`、`deployment.md`
-- 实际：`langchain.md`、`rag.md`
-- 原因：MMR 强制 chunk 级多样性时挤掉了最相关的文档
+**案例 2**：跨主题问题
+- 用户问："多 Agent 系统怎么保证消息不丢？"
+- 期望文档：`stories/18_故事_17双源记忆打架架构重构.md`
+- 实际命中：`notes_interview/q12_Agent_多轮对话怎么实现.md`
+- 原因：语义相近但主题不同
 
 ### 已知不足
 
 **评估层面**：
-- **文档级召回而非 chunk 级**：用 `source`（文件名）判断命中，只有两三篇文档，命中太容易，含金量不高。生产环境应该标注 chunk id 或关键句。
-- **30 条样本太少**：3% 的差异（97% vs 93%）是一条样本的差别，统计上无意义。应该扩到 200 条以上。
-- **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness。
-- **随机基线 84.1%**：语料太小（2 文档/102 chunk），天花板效应明显，判别空间只有 15.9 个点。**这也是 Rerank 提升有限的原因。**
+- **文档级召回而非 chunk 级**：用 `source`（相对路径）判断命中，同一文档的多个 chunk 算命中。粒度还可以更细
+- **chunk 级标注成本高**：需要人工标注每个问题的"正确 chunk id"，耗时大
+- **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness
 
 **架构层面**：
 | 位置 | 问题 | 生产级解法 |
 |---|---|---|
 | `/chat` 和 `/chat/stream` | pymysql 是**同步客户端**，在 async 路径上会阻塞事件循环 | 用 `aiomysql` |
 | `save_conversation` | 每次请求新建连接，没有连接池 | 用连接池（如 `DBUtils`） |
-| ~~`MAX_DISTANCE = 1.1`~~ | ~~阈值校准不够系统，是拍脑袋定的~~ | ✅ 2026-10-10 已修复：标定为 1.0（P=0.967, R=0.967） |
-| 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` 做来源判断 + 显式状态机 |
+| 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` + 显式状态机 |
 | MCP Server 用了私有 API | `vectorstore.docstore._dict` 是内部 API，版本升级可能坏 | 构建索引时自己维护 chunks 列表并 pickle 落盘 |
-| ~~Docker 部署~~ | ~~Dockerfile 缺 COPY docs/，compose 缺 network，host 写死 localhost~~ | ✅ 2026-10-08 已修复 |
-| ~~HF 缓存路径硬编码~~ | ~~`Path.home()/.cache/huggingface/...` 依赖精确路径~~ | ✅ 2026-10-08 已修复：三级探测 |
-| ~~checkpoints 无 volume~~ | ~~`docker compose down` 后记忆全丢~~ | ✅ 2026-10-08 已修复：挂载到 `./data/` |
-| ~~评估代码分叉~~ | ~~评估脚本和服务端各有一份 hybrid_search，参数不一致~~ | ✅ 2026-10-09 已修复：抽到 `rag_core/search.py` |
-| **Rerank 收益被语料规模压制** | **只有 2 文档 102 chunk，判别空间有限** | **扩语料到 500+ chunk** |
+| **Reranker 性能** | CPU 单次 50~100 ms，249 条需 4~8 分钟 | 更小模型 / GPU / 缓存 |
+| **chunk 级评估** | 现在是文档级 | 标注 chunk id |
 
 ### 改进方案
 
@@ -1537,7 +1512,7 @@ def random_baseline(test_set, all_docs, k=3):
 | 降级策略 | 距离阈值拦截无关问题 | ✅ 已做 |
 | 多指标评估 | 召回率 + 精确率 + MRR + 多样性 | ✅ 已做 |
 | 随机基线 | 组合公式精确计算 | ✅ 已做 |
-| 友好错误提示 | friendly_error 映射（异常类型） | ✅ 已做 |
+| 友好错误提示 | friendly_error 映射 | ✅ 已做 |
 | 删掉无效缓存 | 命中率结构性为 0 | ✅ 已做 |
 | Docker 多阶段构建 | 3.51 GB → 2.42 GB | ✅ 已做 |
 | CPU 版 torch | 下载量 5 GB → 600 MB | ✅ 已做 |
@@ -1546,15 +1521,15 @@ def random_baseline(test_set, all_docs, k=3):
 | HF_HOME 三级探测 | 本地/容器都能跑 | ✅ 已做 |
 | 抽公共检索模块 | rag_core/search.py | ✅ 已做 |
 | 阈值标定 | 正负样本距离分布 + PR 曲线 | ✅ 已做（MAX_DISTANCE 1.1→1.0） |
-| **Rerank 精排** | **bge-reranker-base 对 Top-20 重排** | ✅ 已做（精确率 0.86→0.90） |
+| Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ✅ 已做（召回率 +6.5%） |
+| **语料扩充** | 2 篇 → 96 篇 | ✅ 已做 |
+| **测试集自动生成** | 30 条 → 249 条 | ✅ 已做 |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
-| 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
-| 扩语料 | 500+ chunk，让 Rerank 发挥全部威力 | ⏳ 待做 |
 | 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
 
 ### 面试答题模板
 
-> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。检索 pipeline 是两阶段：混合检索召回 Top-20（向量 + BM25 + 加权 RRF），再用 bge-reranker-base 交叉编码器精排 Top-3。Rerank 把精确率从 0.86 提到 0.90，MRR 从 0.94 提到 0.97。降级阈值 MAX_DISTANCE 也是标定出来的——正样本 30 条 + 负样本 25 条，扫 101 个候选点选 P/R 平衡点 1.0，幻觉率从 9.1% 降到 3.3%。所有数字都能用 `python eval/eval_retrieval.py` 和 `python eval/calibrate_distance.py` 复现。诚实的局限：Rerank 收益被语料规模压制（只有 2 文档 102 chunk），下一步扩到 500+ chunk 才能发挥全部威力。"
+> "我构建了 249 个测试项的 RAG 评估集，故意让问题不含文档关键词。测试集是通过脚本自动生成的——遍历 96 篇文档的 chunk，每篇挑 2 个最长 chunk，调 DeepSeek API 生成 3 个问题。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 550 个 chunk 里随机抽 3 个，命中期望 source 的概率是 3.5%。检索 pipeline 是两阶段：混合检索召回 Top-20（向量 + BM25 + 加权 RRF），再用 bge-reranker-base 交叉编码器精排 Top-3。Rerank 把召回率从 60.2% 提到 66.7%，MRR 从 0.47 提到 0.54。降级阈值 MAX_DISTANCE 也是标定出来的——正样本 30 条 + 负样本 25 条，扫 101 个候选点选 P/R 平衡点 1.0，幻觉率从 9.1% 降到 3.3%。所有数字都能用 `python eval/eval_retrieval.py` 复现。**这里有个真实的迭代故事**：我第一版语料只有 2 篇文档、测试集 30 条，随机基线 84.1%——天花板效应让 Rerank 提升看起来只有 +0.04 精确率。**扩语料到 96 篇、测试集到 249 条后**，随机基线降到 3.5%，Rerank 的真实增益才显现出来。"
 
 ## 十四、Docker 部署完整方案（面试重点）
 
@@ -1667,57 +1642,26 @@ torch
 | 时间 | 问题 | 动作 |
 |---|---|---|
 | 19:00 | `unpigz corrupted`，构建失败 | 查 C 盘 → 0 字节 |
-| 19:10 | 清理 C 盘（Temp + SoftwareDistribution + HF cache） | Free 10 GB |
-| 19:20 | 项目搬到 D:\Projects\Agent | Move-Item 被锁 → robocopy 绕过 |
+| 19:10 | 清理 C 盘 | Free 10 GB |
+| 19:20 | 项目搬到 D:\Projects\Agent | robocopy 绕过文件锁 |
 | 19:30 | Docker 数据迁移 | Settings → `D:\Docker` → C 盘 65 GB |
-| 19:50 | 重建 Dockerfile（多阶段 + 阿里云源 + CPU torch） | 构建成功，2.42 GB |
-| 20:00 | 启动容器 | `docker compose up -d` ✅ |
-| 20:10 | 首次 `/chat` 报 `FileNotFoundError: snapshots` | MCP Server 找不到模型缓存 |
-| 20:20 | 宿主机 `snapshot_download` 到 `hf_cache/` | 192 MB 下完 |
-| 20:30 | 重启容器 | `Application startup complete.` ✅ |
-| 20:35 | 端到端测试（chat / stream / 多轮记忆） | 全过 ✅ |
+| 19:50 | 重建 Dockerfile | 构建成功，2.42 GB |
+| 20:00 | 启动容器 | ✅ |
+| 20:10 | 首次 `/chat` 报 `FileNotFoundError` | MCP Server 找不到模型缓存 |
+| 20:20 | 宿主机 `snapshot_download` | 192 MB 下完 |
+| 20:30 | 重启容器 | ✅ |
 | 21:00 | 发现 `docker compose down` 后记忆全丢 | checkpoints 无 volume |
-| 21:10 | 改 `DATA_DIR` + compose 加 volume | 跨容器重建记忆保留 ✅ |
+| 21:10 | 改 `DATA_DIR` + compose 加 volume | ✅ |
 
-**2026-10-09（评估可复现 + 抽公共模块）**
+**2026-10-09**：抽公共模块 + 加随机基线
 
-| 时间 | 问题 | 动作 |
-|---|---|---|
-| 16:50 | 抽 `rag_core/search.py` 公共模块 | 服务端 import 改公共模块 ✅ |
-| 17:00 | Dockerfile 加 `COPY rag_core/` | 容器重建成功 ✅ |
-| 17:06 | `mcp_rag_server.py` 加 sys.path hack | 本地/容器都能 import ✅ |
-| 17:10 | 评估脚本重写（加随机基线） | 跑出 84.1% ✅ |
-| 17:15 | 删掉 `eval/hybrid_search_test.py` | 分叉实现清理 ✅ |
-| 17:20 | Git 提交 + 推送 | `99af642` ✅ |
+**2026-10-10**：正负样本标定 MAX_DISTANCE 1.1→1.0
 
-**2026-10-10（阈值标定）**
-
-| 时间 | 问题 | 动作 |
-|---|---|---|
-| 19:20 | 构造 25 条负样本 | `eval/negatives.json` ✅ |
-| 19:30 | 写标定脚本 | `eval/calibrate_distance.py` ✅ |
-| 19:56 | 画两张图 | `eval/output/*.png` ✅ |
-| 20:00 | 分析：1.1 偏松，F1 最大 1.06，P≥0.95 最高召回 1.00 | 决策选 1.00 ✅ |
-| 20:10 | 改 `MAX_DISTANCE = 1.0` | 幻觉率 9.1% → 3.3% ✅ |
-| 20:20 | 重跑评估，混合检索召回 100% → 96.7% | 有意取舍 ✅ |
-| 20:30 | Git 提交 | `466e671` ✅ |
-
-**2026-10-11（Rerank）**
-
-| 时间 | 问题 | 动作 |
-|---|---|---|
-| 13:58 | 恢复 Docker 环境 | 容器都 Up ✅ |
-| 14:00 | 下载 bge-reranker-base（3.36 GB） | 2 分 23 秒下完 ✅ |
-| 14:10 | 改 `rag_core/search.py` 加 `rerank` + `hybrid_search_with_rerank` | import OK ✅ |
-| 14:15 | 改 `mcp_rag_server.py` 用新 pipeline | 本地验证 OK ✅ |
-| 14:20 | 改 `eval_retrieval.py` 加 Rerank 策略 | 5 策略对比 ✅ |
-| 14:25 | 跑评估：精确率 0.86 → 0.90，MRR 0.94 → 0.97 | ✅ |
-| 14:30 | 容器端到端测试 | ✅ |
-| 14:35 | Git 提交 | `37d47f1` ✅ |
+**2026-10-11**：Rerank 精排 + 语料 2→96 篇 + 测试集 30→249 条
 
 ### 14.5 面试话术（Docker 部署）
 
-> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，3.36 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 1.0，幻觉率从 9.1% 降到 3.3%。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，精确率从 0.86 提到 0.90。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
+> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，3.36 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 1.0，幻觉率从 9.1% 降到 3.3%。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，召回率从 60.2% 提到 66.7%。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
 
 ## 十五、项目新增数据（更新）
 
@@ -1728,63 +1672,52 @@ torch
 - 镜像大小：3.51 GB → **2.42 GB**（content 519 MB）
 - 构建耗时：33 分钟（CUDA）→ **5~10 分钟**（CPU）
 - pip 下载量：3~5 GB → **~600 MB**
-- 镜像平台：Linux/amd64（`manylinux` wheel，Python 3.12 `cp312`）
-- 宿主机平台：Windows/amd64（`win_amd64` wheel，Python 3.14 `cp314`）
-  - **注意**：两者不通用，宿主机下 wheel 给容器用是错的
 - checkpoints 持久化：`./data/checkpoints.db`（volume 挂载）
 - 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用）
 - 阈值标定：`eval/calibrate_distance.py`（正样本 30 + 负样本 25）
-- MAX_DISTANCE：1.1 → **1.0**（P=0.967, R=0.967, F1=0.967）
-- 幻觉率降低：9.1% → **3.3%**（用 3.3% 漏答换）
-- **Reranker 模型：bge-reranker-base（3.36 GB，本地缓存）**
-- **Rerank 提升：精确率 0.86 → 0.90，MRR 0.94 → 0.97**
+- MAX_DISTANCE：1.1 → **1.0**
+- 幻觉率降低：9.1% → **3.3%**
+- Reranker 模型：bge-reranker-base（3.36 GB，本地缓存）
+- **Rerank 提升：召回率 60.2% → 66.7%，MRR 0.47 → 0.54**
+- **语料扩充：2 篇 → 96 篇，chunk 102 → 550**
+- **测试集扩充：30 条 → 249 条，随机基线 84.1% → 3.5%**
 
 ### Git 仓库状态（最新）
 
 - 新增 commit：
+  - `2eb5ccb` feat: 扩测试集 30→249 条（覆盖 83 篇文档），拆分面试题为 25 文件，随机基线 84.1%→3.5%
+  - `5fe1817` feat: 扩语料 2 篇 → 72 篇（拆分三个笔记 + LangChain 笔记），chunk 102 → 547
+  - `7feaade` docs: 补充 Rerank 精排的说明、评估数据和踩坑记录
   - `37d47f1` feat: 加 Rerank 精排（bge-reranker-base），精确率 0.86 → 0.90
   - `f89cda3` docs: 补充 MAX_DISTANCE 阈值标定（1.1 → 1.0）的说明和实验数据
   - `466e671` feat: 标定 MAX_DISTANCE 阈值（1.1 → 1.0），幻觉率从 9.1% 降到 3.3%
   - `99af642` refactor: 抽公共 hybrid_search 到 rag_core，评估脚本加随机基线
   - `6f9f286` fix: 修复 HF 缓存路径和 checkpoints 持久化
-  - `d7967f6` docs: 更新复盘笔记与 README，补充 Docker 部署和踩坑经验
-- `.gitignore` 关键规则：
-  - `hf_cache/`（模型缓存，embedding 192 MB + reranker 3.36 GB）
-  - `data/`（checkpoints 持久化目录）
-  - `wheelhouse/`（Docker wheel 缓存）
-  - `checkpoints.db*` `*.sqlite` `*.sqlite3`（运行时数据库）
-  - `faiss_index/` **已移除**（索引只有 248 KB，提交进仓库让 clone 后可直接构建）
 - GitHub：https://github.com/wzy106/rag-agent-service
 
 ## 十六、项目数据汇总（最新）
 
 - MySQL 表名：`conversations`（展示层）
-- MySQL 字段：id, thread_id, role, content, created_at
 - 新增接口：`GET /history?thread_id=user_001&limit=20`
-- 评估集规模：30 个测试项
-- 当前知识库：2 个文档、102 个 chunk
-- 评估指标：召回率 / 精确率 / MRR / 多样性 / 随机基线
-- 随机检索基线：**84.1%**（组合公式精确计算）
-- 相似度：召回率 100%，精确率 0.87，MRR 0.96，多样性 1.37
-- MMR：召回率 100%，精确率 0.83，MRR 0.97，多样性 1.43
-- MMR + 去重：召回率 100%，精确率 0.77，MRR 0.97，多样性 1.57
-- 混合检索（降级 1.0）：召回率 96.7%，精确率 0.86，MRR 0.94，多样性 1.30
-- **混合检索 + Rerank：召回率 96.7%，精确率 0.90，MRR 0.97，多样性 1.17**
+- **知识库：96 篇文档 / 550 chunk**
+- **评估集：249 个测试项（覆盖 83 篇文档，脚本自动生成）**
+- **随机检索基线：3.5%**（判别空间 63.2 个点）
+- 相似度：召回率 56.2%，精确率 0.25，MRR 0.42，多样性 2.66
+- MMR：召回率 43.0%，精确率 0.17，MRR 0.36，多样性 2.81
+- MMR + 去重：召回率 46.6%，精确率 0.16，MRR 0.37，多样性 **3.00**
+- 混合检索：召回率 60.2%，精确率 0.27，MRR 0.47，多样性 2.59
+- **混合检索 + Rerank：召回率 66.7%，精确率 0.29，MRR 0.54，多样性 2.59**
 - 混合检索参数：rrf_k=60, vector_weight=0.7, bm25_weight=0.3
 - Rerank 参数：recall_k=20, final_k=3, RERANKER_MODEL="BAAI/bge-reranker-base"
-- 降级阈值：MAX_DISTANCE=1.0（标定得出，P=0.967, R=0.967）
+- 降级阈值：MAX_DISTANCE=1.0（标定得出）
 - 护栏参数：recursion_limit=10, max_tokens=2000
-- 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，容器重建不丢）
-- checkpoints 持久化：`./data/checkpoints.db`（volume 挂载）
-- 缓存：暂时没有（已删 Redis，命中率结构性为 0）
-- Redis：依赖保留，预留做限流
-- 错误处理：`friendly_error` 用异常类型映射，不泄漏内部信息
-- requirements.txt：18 个包 + 顶部 2 行（CPU 索引），已在干净 venv 里验证可导入
-- 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用同一份 `hybrid_search` 和 `rerank`）
-- 评估可复现：`python eval/eval_retrieval.py` 一条命令输出所有指标 + 84.1% 随机基线 + Rerank 对比
-- 阈值标定：`python eval/calibrate_distance.py` 输出正负样本距离分布 + PR 曲线
+- 记忆：LangGraph checkpointer + AsyncSqliteSaver（容器重建不丢）
+- 公共模块：`rag_core/search.py`
+- 评估可复现：`python eval/eval_retrieval.py`
+- 测试集生成：`python scripts/generate_testset.py`（成本约 ¥0.2）
+- 阈值标定：`python eval/calibrate_distance.py`
 - GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ---
 
-**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通、评估可复现、阈值有实验支撑、Rerank 精排就位**，可进入面试冲刺阶段。
+**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通、评估可复现、阈值有实验支撑、Rerank 精排就位、语料 96 篇、测试集 249 条**，可进入面试冲刺阶段。

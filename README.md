@@ -21,7 +21,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
                             ↓
                     Rerank 精排 Top-3（bge-reranker-base, CrossEncoder）
                             ↓
-                        FAISS 向量库
+                    FAISS 向量库（96 篇文档 / 550 chunk）
                             ↓ 检索结果返回给 Agent
                         DeepSeek 生成回答
     ↓ SSE 流式返回
@@ -45,7 +45,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 - **RAG 检索增强**：本地 embedding（BAAI/bge-small-zh-v1.5）+ FAISS 持久化
 - **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
 - **混合检索**：向量 + BM25 + 加权 RRF（向量 0.7 / BM25 0.3）
-- **Rerank 精排**：bge-reranker-base（CrossEncoder），精确率 0.86 → 0.90
+- **Rerank 精排**：bge-reranker-base（CrossEncoder），召回率 +6.5%，MRR +0.07
 - **公共检索模块**：`rag_core/search.py`，服务端和评估脚本共用同一份 `hybrid_search`
 - **降级策略**：向量距离阈值（标定为 1.0），检索不到就不调 LLM，避免幻觉
 - **MCP 工具解耦**：工具独立成 Server，跨进程 stdio 通信
@@ -53,7 +53,8 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 - **MySQL 展示层**：对话历史按 thread_id 持久化，供 `/history` 接口查询
 - **Agent 护栏**：`recursion_limit=10` + `max_tokens=2000`，防止死循环和 Token 爆炸
 - **友好错误处理**：异常映射为可读提示，不泄漏 API key、路径等内部信息
-- **RAG 评估**：30 个测试项，五指标对比 + 随机基线，一条命令可复现
+- **RAG 评估**：249 条测试项，5 种策略对比 + 随机基线（3.5%），一条命令可复现
+- **测试集自动生成**：脚本用 DeepSeek API 批量生成 200+ 条
 - **阈值标定**：正负样本距离分布 + PR 曲线，幻觉率从 9.1% 降到 3.3%
 - **Docker 部署**：多阶段构建，镜像 2.42 GB，一键启动
 
@@ -64,10 +65,16 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 | `rag_api/` | FastAPI + Agent 服务（核心） |
 | `rag_core/search.py` | 公共检索模块（含 Rerank，服务端 + 评估脚本共用） |
 | `mcp_test/mcp_rag_server.py` | RAG MCP Server |
-| `docs/` | 知识库文档（真实笔记） |
-| `eval/` | RAG 评估脚本 + 测试集 + 阈值标定 |
+| `docs/` | 知识库文档（96 篇 markdown，按主题分 5 个子目录） |
+| `docs/langchain/` | LangChain 组件教程（12 篇） |
+| `docs/notes/` | 项目笔记（15 篇） |
+| `docs/notes_interview/` | 面试题逐个拆分（25 篇） |
+| `docs/readme/` | README 按章节拆分（12 篇） |
+| `docs/stories/` | 踩坑故事（32 篇） |
+| `eval/` | RAG 评估脚本 + 测试集（249 条）+ 阈值标定 |
 | `eval/output/` | 标定产生的图（距离分布 + PR 曲线） |
-| `faiss_index/` | FAISS 索引（204 KB + 44 KB，已提交进 Git） |
+| `scripts/` | 工具脚本（拆分笔记、生成测试集） |
+| `faiss_index/` | FAISS 索引（550 chunk，已提交进 Git） |
 | `hf_cache/` | HuggingFace 模型缓存（embedding + reranker，volume 挂载） |
 | `data/` | checkpoints.db 持久化目录（volume 挂载，不提交） |
 | `first_test/` | 早期手写 Agent 练习 |
@@ -189,25 +196,41 @@ MYSQL_PASSWORD=your_mysql_password
 
 ## RAG 评估
 
-构建 30 个测试项，5 种策略对比：
+构建 **249 条测试项**（覆盖 83 篇文档），5 种策略对比：
 
 | 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
 |---|---|---|---|---|
-| 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
-| MMR | 100% | 0.83 | 0.97 | 1.43 |
-| MMR + 按来源去重 | 100% | 0.77 | 0.97 | **1.57** |
-| 混合检索（向量+BM25+RRF） | 96.7% | 0.86 | 0.94 | 1.30 |
-| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
-| 随机基线 | **84.1%** | — | — | — |
+| 普通相似度 | 56.2% | 0.25 | 0.42 | 2.66 |
+| MMR | 43.0% | 0.17 | 0.36 | 2.81 |
+| MMR + 按来源去重 | 46.6% | 0.16 | 0.37 | **3.00** |
+| 混合检索（向量+BM25+RRF） | 60.2% | 0.27 | 0.47 | 2.59 |
+| **混合检索 + Rerank** | **66.7%** | **0.29** | **0.54** | 2.59 |
+| **随机基线** | **3.5%** | — | — | — |
 
 **关键发现**：
-- **Rerank 显著提升精确率和 MRR**：精确率 0.86 → 0.90（+0.04），MRR 0.94 → 0.97（+0.03）
-- Rerank 不解决召回问题（召回率保持 96.7%），只优化排序质量
-- **Rerank 收益被语料规模压制**：只有 2 文档 / 102 chunk，天花板效应明显
-- 混合检索带降级（`MAX_DISTANCE=1.0`），拒答 1 条正样本，是有意取舍（详见"阈值标定"）
-- 随机基线召回率 84.1%，说明当前 30 条样本的判别力有限（差 15.9 个点）
+- **随机基线 3.5%** → 判别空间扩大到 **63.2 个点**（旧测试集只有 15.9 个点）
+- **Rerank 增益显著**：召回率 +6.5%（60.2% → 66.7%），MRR +0.07
+- **混合检索优于纯相似度**：召回率 60.2% vs 56.2%（+4%）
+- **MMR 在"精确匹配"任务上吃亏**：召回率只有 43%（多样性导向，牺牲精度）
+- **多样性 trade-off 明显**：MMR+去重 3.00 vs 相似度 2.66
 
-> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线 + Rerank）。首次跑会加载 Reranker 模型（10~20 秒）。
+> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字。首次跑会加载 Reranker 模型（10~20 秒）。
+
+## 测试集自动生成
+
+`eval/test_set_v2.json` 里的 249 条测试项是通过脚本自动生成的：
+
+**流程**：
+1. 遍历所有 chunk，按 source 分组
+2. 每篇文档挑 2 个最长 chunk
+3. 调 DeepSeek API 生成 3 个问题（覆盖这 2 个 chunk 的内容）
+4. 标注 `expected_sources = 该文档的 source`
+
+**脚本**：`python scripts/generate_testset.py`
+
+**成本**：约 ¥0.2（96 篇 × 1 次 API 调用）
+
+**质量**：抽查前 10 条，问题口语化、角度多样、能被对应文档回答
 
 ## 阈值标定
 
@@ -263,23 +286,25 @@ python eval/calibrate_distance.py
 | 删掉 Redis 缓存 | 命中率结构性为 0，是负优化 |
 | 检索层降级（距离阈值） | 比 Prompt 软约束更可靠，从根源避免幻觉 |
 | 错误映射为友好提示 | `str(e)` 可能泄漏 API key、路径等内部信息 |
-| 混合检索加权 RRF | 等权 RRF 实测反而比纯向量差（97%） |
+| 混合检索加权 RRF | 等权 RRF 实测反而比纯向量差 |
 | 抽公共 `hybrid_search` 到 `rag_core/` | 服务端和评估脚本共用一份代码，保证"评估跑的就是部署的" |
 | `MAX_DISTANCE` 标定为 1.0 | 通过正负样本距离分布 + PR 曲线找到 P/R 平衡点，幻觉率从 9.1% 降到 3.3% |
-| **两阶段检索（召回 + Rerank）** | **粗排快（双塔）+ 精排准（交叉编码器），精确率 0.86 → 0.90** |
+| **两阶段检索（召回 + Rerank）** | **粗排快（双塔）+ 精排准（交叉编码器），召回率 +6.5%** |
+| **语料 96 篇 / 550 chunk** | **扩大判别空间，避免天花板效应** |
+| **测试集 249 条（自动生成）** | **统计意义充分，随机基线降到 3.5%** |
 | Docker 多阶段构建 | builder 阶段装编译器，运行时不带，镜像从 3.51 GB 降到 2.42 GB |
 | CPU 版 torch | 项目只用 bge-small 做 embedding，CPU 毫秒级；下载量从 5 GB 降到 600 MB |
 | 模型缓存 volume 挂载 | 模型下载移出构建期，避免网络超时；重建不重下 |
 | HF_HOME 三级探测 | 环境变量 > 容器默认挂载点 > 项目内 hf_cache，本地和容器都能跑 |
-| FAISS 索引提交进 Git | 只有 248 KB，别人 clone 后可直接构建 |
+| FAISS 索引提交进 Git | 550 chunk 索引约 1~2 MB，别人 clone 后可直接构建 |
 
 ## 已知不足
 
 - pymysql 是**同步客户端**，在 async 路径上会阻塞事件循环（生产应换 `aiomysql`）
 - `save_conversation` 每次请求新建 MySQL 连接，无连接池
-- 评估是**文档级召回**而非 chunk 级，样本 30 条偏少，且缺端到端指标
+- 评估是**文档级召回**而非 chunk 级，粒度还可以更细
 - 流式状态机用布尔变量表达，边界情况可能出错
-- **Rerank 收益被语料规模压制**：只有 2 文档 / 102 chunk，提升空间有限（扩到 500+ chunk 才能发挥）
+- **Rerank 单次推理 50~100 ms（CPU）**，249 条查询需 4~8 分钟；高并发场景需要优化（更小模型 / GPU / 缓存）
 
 ## 学习路径
 
