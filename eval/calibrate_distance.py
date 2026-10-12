@@ -2,7 +2,7 @@
 MAX_DISTANCE 阈值标定脚本
 
 思路：
-- 正样本（来自 test_set.json）：知识库中应该能命中
+- 正样本（来自 test_set_v2.json，抽样 100 条）：知识库中应该能命中
 - 负样本（来自 negatives.json）：知识库中明显没有
 - 对每条问题用 similarity_search_with_score 拿 best_distance
 - 画正负样本距离分布直方图，找分离点
@@ -17,10 +17,16 @@ MAX_DISTANCE 阈值标定脚本
     eval/output/distance_distribution.png
     eval/output/pr_curve.png
     命令行统计表 + 推荐阈值
+
+注意：
+- 语料扩展后（102 → 576 chunk），旧的 test_set.json 已废弃（expected_sources 指向已删除的旧文档）
+- 正样本改用 test_set_v2.json 抽样（固定随机种子，可复现）
+- 阈值相关输出用 MAX_DISTANCE 常量，不再硬编码
 """
 import os
 import sys
 import json
+import random
 from pathlib import Path
 
 # ===== 确保能找到项目根的 rag_core 包 =====
@@ -28,7 +34,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from rag_core.search import load_vectorstore, LocalEmbeddings, DEFAULT_MODEL
+from rag_core.search import (
+    load_vectorstore,
+    LocalEmbeddings,
+    DEFAULT_MODEL,
+    MAX_DISTANCE,
+)
 
 
 # ===== 加载数据 =====
@@ -40,14 +51,19 @@ EVAL_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = EVAL_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-with open(EVAL_DIR / "test_set.json", encoding="utf-8") as f:
-    positives = [item["question"] for item in json.load(f)]
+# 正样本从新测试集 test_set_v2.json 抽样 100 条（全跑 249 条太慢）
+# 旧 test_set.json（30 条）的 expected_sources 指向已删除的旧文档，不能用
+with open(EVAL_DIR / "test_set_v2.json", encoding="utf-8") as f:
+    positives_all = [item["question"] for item in json.load(f)]
+    random.seed(42)  # 固定种子，保证可复现
+    positives = random.sample(positives_all, min(100, len(positives_all)))
 
 with open(EVAL_DIR / "negatives.json", encoding="utf-8") as f:
     negatives = json.load(f)["questions"]
 
-print(f"正样本：{len(positives)} 条")
-print(f"负样本：{len(negatives)} 条\n")
+print(f"正样本：{len(positives)} 条（从 {len(positives_all)} 条中抽样）")
+print(f"负样本：{len(negatives)} 条")
+print(f"当前 MAX_DISTANCE = {MAX_DISTANCE}\n")
 
 
 # ===== 计算 best_distance =====
@@ -123,10 +139,10 @@ best_p95 = max(valid, key=lambda r: r[2]) if valid else None
 print("\n" + "=" * 70)
 print("推荐阈值")
 print("=" * 70)
-print(f"当前阈值 = 1.10")
-print(f"  Precision = {evaluate_threshold(1.10)[0]:.3f}")
-print(f"  Recall    = {evaluate_threshold(1.10)[1]:.3f}")
-print(f"  F1        = {evaluate_threshold(1.10)[2]:.3f}")
+print(f"当前阈值 = {MAX_DISTANCE}")
+print(f"  Precision = {evaluate_threshold(MAX_DISTANCE)[0]:.3f}")
+print(f"  Recall    = {evaluate_threshold(MAX_DISTANCE)[1]:.3f}")
+print(f"  F1        = {evaluate_threshold(MAX_DISTANCE)[2]:.3f}")
 
 t, p, r, f1, tp, fp, fn, tn = best_f1
 print(f"\nF1 最大点 = {t:.2f}")
@@ -157,9 +173,11 @@ try:
     bins = [round(0.4 + i * 0.05, 2) for i in range(25)]  # 0.4 ~ 1.6
     ax.hist(pos_dists, bins=bins, alpha=0.6, label=f"正样本 (n={len(pos_dists)})", color="#2E86DE")
     ax.hist(neg_dists, bins=bins, alpha=0.6, label=f"负样本 (n={len(neg_dists)})", color="#EE5A52")
-    ax.axvline(1.10, color="black", linestyle="--", linewidth=2, label="当前 MAX_DISTANCE=1.10")
-    if best_f1[0] != 1.10:
-        ax.axvline(best_f1[0], color="green", linestyle=":", linewidth=2, label=f"F1 最大 ={best_f1[0]:.2f}")
+    ax.axvline(MAX_DISTANCE, color="black", linestyle="--", linewidth=2,
+               label=f"当前 MAX_DISTANCE={MAX_DISTANCE}")
+    if best_f1[0] != MAX_DISTANCE:
+        ax.axvline(best_f1[0], color="green", linestyle=":", linewidth=2,
+                   label=f"F1 最大 ={best_f1[0]:.2f}")
     ax.set_xlabel("best_distance (L2 距离，越小越相关)")
     ax.set_ylabel("样本数")
     ax.set_title("正负样本的 best_distance 分布")
@@ -179,9 +197,11 @@ try:
     ax1.plot(ts, ps, label="Precision", color="#2E86DE", linewidth=2)
     ax1.plot(ts, rs, label="Recall", color="#EE5A52", linewidth=2)
     ax1.plot(ts, fs, label="F1", color="green", linewidth=2, linestyle="--")
-    ax1.axvline(1.10, color="black", linestyle=":", alpha=0.7, label="当前阈值 1.10")
-    if best_f1[0] != 1.10:
-        ax1.axvline(best_f1[0], color="orange", linestyle=":", alpha=0.7, label=f"F1 最大 ={best_f1[0]:.2f}")
+    ax1.axvline(MAX_DISTANCE, color="black", linestyle=":", alpha=0.7,
+                label=f"当前阈值 {MAX_DISTANCE}")
+    if best_f1[0] != MAX_DISTANCE:
+        ax1.axvline(best_f1[0], color="orange", linestyle=":", alpha=0.7,
+                    label=f"F1 最大 ={best_f1[0]:.2f}")
     ax1.set_xlabel("MAX_DISTANCE 阈值")
     ax1.set_ylabel("指标值")
     ax1.set_title("阈值扫描：Precision / Recall / F1")

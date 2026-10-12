@@ -35,9 +35,11 @@ from sentence_transformers import SentenceTransformer
 
 
 # 向量 L2 距离阈值，超过认为不相关（bge 归一化后范围 0~2）
-# 通过 eval/calibrate_distance.py 标定：Precision=0.967, Recall=0.967, F1=0.967
-# 相比原值 1.1（P=0.909），幻觉率从 9.1% 降到 3.3%
-MAX_DISTANCE = 1.0
+# 通过 eval/calibrate_distance.py 标定（2026-10-12，新语料 576 chunk）：
+# 正样本 100 条 + 负样本 25 条
+# 阈值 0.96 是 F1 最大点：P=0.990, R=1.000, F1=0.995
+# 相比 1.0（P=0.980, R=1.000），精确率 +1%
+MAX_DISTANCE = 0.96
 
 # 默认模型和索引位置
 DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
