@@ -32,11 +32,10 @@
 | bge-reranker-large | 560M | 2.2 GB | 效果更好，慢 2 倍 |
 | bge-reranker-v2-m3 | 568M | 2.3 GB | 最新，多语言 |
 | Cohere Rerank | 闭源 | API | 需付费，无需部署 |
-| Jina Reranker | - | - | 长上下文优势 |
 
 **bge-reranker-base 的选择理由**：
 - 中英双语都支持
-- 3 GB 大小，CPU 上单条推理 100~300 ms
+- 3 GB 大小，CPU 上单条推理 50~100 ms
 - 有开源权重，完全离线
 
 ### Rerank 是什么

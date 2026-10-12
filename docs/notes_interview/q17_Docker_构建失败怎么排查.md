@@ -19,6 +19,3 @@ failed to solve: Unavailable: error reading from server: EOF
 1. 清 C 盘（cleanmgr + 手动删 Temp/SoftwareDistribution/HF cache）
 2. Docker 数据迁到 D 盘（Settings → Disk image location）
 3. C 盘从 10 GB → 65 GB 可用
-
-**面试话术**：
-> "Docker 构建报 `unpigz corrupted` 这种错误，第一反应要查磁盘空间，不是改代码。我当时 C 盘 0 字节，Docker 在 unpacking 阶段写不进去才报的这个错。后来把 Docker 数据从 C 盘迁到 D 盘，问题解决。"

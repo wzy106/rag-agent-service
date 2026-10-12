@@ -4,13 +4,17 @@
 
 ```python
 docs_dir = Path(__file__).resolve().parent.parent / "docs"
-for md_file in docs_dir.glob("*.md"):
+documents = []
+# rglob 递归扫描子目录
+for md_file in docs_dir.rglob("*.md"):
     text = md_file.read_text(encoding="utf-8")
-    documents.append(Document(page_content=text, metadata={"source": md_file.name}))
+    rel_path = md_file.relative_to(docs_dir).as_posix()
+    documents.append(Document(page_content=text, metadata={"source": rel_path}))
 ```
 
-- 加载 `docs/` 下所有 Markdown 文件
-- 每个文件转成 `Document` 对象，带 `source` 元数据
+- 加载 `docs/` 下**所有子目录**的 Markdown 文件（用 `rglob` 递归）
+- **`source` 用相对路径**（如 `notes_interview/q01_xxx.md`），避免不同子目录同名文件冲突
+- 当前知识库：96 篇 markdown，切成 550 块
 
 ### 2. 文档切分
 
@@ -27,7 +31,6 @@ chunks = splitter.split_documents(documents)
 - `chunk_overlap=50`：相邻块重叠 50 字符，防止关键信息被切断
 - `separators`：按优先级尝试切分，先段落再句子最后字符
 - 中文场景专门加了 `。！？` 分隔符
-- 当前知识库：2 个 Markdown 文件（真实笔记），切成 102 块
 
 ### 3. Embedding
 
@@ -49,8 +52,6 @@ class LocalEmbeddings(Embeddings):
 
 ### 4. 向量库 + 持久化
 
-> **变更（2026-10-08）**：`faiss_index/` 已从 `.gitignore` 移除，索引文件（index.faiss 204KB + index.pkl 44KB）已提交进 Git。别人 clone 后可直接构建，无需先跑建索引脚本。
-
 ```python
 INDEX_DIR = Path(__file__).resolve().parent.parent / "faiss_index"
 
@@ -63,7 +64,7 @@ else:
 
 - 首次启动：构建索引并保存到磁盘（`index.faiss` + `index.pkl`）
 - 后续启动：直接从磁盘加载，避免重复 embedding
-- 索引文件提交进 Git（248 KB，很小）
+- 索引文件提交进 Git（550 chunk 约 1~2 MB）
 
 ### 5. 检索策略
 
@@ -75,7 +76,7 @@ else:
 results = vectorstore.similarity_search(query, k=3)
 ```
 
-最基础的余弦相似度检索。
+最基础的余弦相似度检索。**在 249 条测试集上召回率 56.2%。**
 
 #### 5.2 MMR 检索
 
@@ -89,22 +90,13 @@ results = vectorstore.max_marginal_relevance_search(query, k=3, fetch_k=10)
 - 同一文档里差异大的 chunk，MMR 也可能都选
 - 想保证"Top-3 来自不同文档"，需要额外按文档去重
 
+**在 249 条测试集上的表现**：召回率只有 **43.0%**——在"精确匹配"任务上吃亏，但多样性最高（2.81）。
+
 #### 5.3 混合检索（加权 RRF）
 
 **为什么需要**：纯向量检索对关键词不敏感，用户用口语化表达时和文档术语之间有语义鸿沟。
 
-**BM25 索引构建**：
-
-```python
-import jieba
-from rank_bm25 import BM25Okapi
-
-all_docs = list(vectorstore.docstore._dict.values())
-tokenized_corpus = [list(jieba.cut(doc.page_content)) for doc in all_docs]
-bm25 = BM25Okapi(tokenized_corpus)
-```
-
-**加权 RRF 合并**：
+**实现**（`rag_core/search.py`）：
 
 ```python
 def hybrid_search(query, vectorstore, bm25, all_docs, k=3, rrf_k=60,
@@ -161,7 +153,9 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 - 加权（0.7/0.3）：100% 召回率
 - **向量检索更可靠，给它更高权重**
 
-#### 5.4 Rerank 精排（2026-10-11 新增）
+**在 249 条测试集上的表现**：混合检索召回率 **60.2%** > 纯相似度 56.2%（**+4%**）。
+
+#### 5.4 Rerank 精排
 
 **为什么需要**：混合检索是"双塔 + 关键词"的粗排，速度快但精度有限。Rerank 用交叉编码器把 Top-20 精排到 Top-3，精度更高。
 
@@ -201,18 +195,19 @@ def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
     return rerank(query, candidates, top_k=final_k)
 ```
 
-**效果**（30 条测试项）：
+**效果**（249 条测试项，覆盖 83 篇文档）：
 
 | 策略 | 召回率 | 精确率 | MRR | 多样性 |
 |---|---|---|---|---|
-| 混合检索 | 96.7% | 0.86 | 0.94 | 1.30 |
-| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
+| 混合检索 | 60.2% | 0.27 | 0.47 | 2.59 |
+| **混合检索 + Rerank** | **66.7%** | **0.29** | **0.54** | 2.59 |
 
-- 精确率 **+0.04**，MRR **+0.03**
-- 召回率不变（Rerank 不解决"召回阶段漏掉"的问题）
-- 多样性略降（Rerank 偏向最相关，牺牲多样性）——**符合预期**
+- 召回率 **+6.5%**，MRR **+0.07**
+- **Rerank 提升的主要是召回率**——混合检索直接返回 Top-3 会漏掉"相关但排名 4~20"的 chunk，Rerank 拿 Top-20 重新排，有机会把关键 chunk 顶上来
 
-**懒加载设计**：Reranker 模型 3.36 GB，加载要 10~20 秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，之后复用。**不拖慢服务启动**。
+**懒加载设计**：Reranker 模型 3.36 GB，加载要 10~20 秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**。
+
+**性能问题**：249 条查询 × 20 候选 = 4980 次推理，CPU 上单次 50~100 ms，总耗时 **4~8 分钟**。高并发场景需要优化（更小模型 / GPU / 缓存）。
 
 #### 5.5 降级策略（避免幻觉）
 
@@ -225,17 +220,6 @@ def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
 # Precision=0.967, Recall=0.967, F1=0.967
 # 相比原值 1.1（P=0.909），幻觉率从 9.1% 降到 3.3%
 MAX_DISTANCE = 1.0
-```
-
-`search_knowledge` 工具处理空结果：
-
-```python
-@mcp.tool
-def search_knowledge(query: str) -> str:
-    results = hybrid_search_with_rerank(query, ..., recall_k=20, final_k=3, verbose=True)
-    if not results:
-        return "知识库中没有找到相关信息。"
-    return "\n\n".join([f"[{doc.metadata['source']}]\n{doc.page_content}" for doc in results])
 ```
 
 **阈值标定实验（2026-10-10）**：

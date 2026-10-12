@@ -2,9 +2,53 @@
 
 ### 评估方法
 
-构建 30 个测试项的测试集，每个标注期望命中的文档。
-问题故意不包含文档关键词，测试语义检索能力。
-包含单文档问题和多文档问题（一个 query 对应多个相关文档）。
+构建 **249 条测试项**（覆盖 83 篇文档），测试集用脚本自动生成：
+1. 遍历所有 chunk，按 source 分组
+2. 每篇文档挑 2 个最长 chunk
+3. 调 DeepSeek API 生成 3 个问题
+4. 标注 `expected_sources = 该文档的 source`
+
+**关键设计**：
+- 问题口语化、角度多样、能被对应文档回答
+- 13 篇极短文档（chunk < 2）被跳过
+- 平均每篇 3 题
+
+### 测试集自动生成脚本
+
+`scripts/generate_testset.py`：
+
+```python
+async def generate_questions(source: str, chunks: list, sem: asyncio.Semaphore):
+    async with sem:
+        # 挑两个最长 chunk
+        sorted_chunks = sorted(chunks, key=lambda c: len(c.page_content), reverse=True)
+        picked = sorted_chunks[:CHUNKS_PER_DOC]
+        if len(picked) < 2:
+            return None
+
+        prompt = PROMPT_TEMPLATE.format(
+            chunk1=picked[0].page_content[:800],
+            chunk2=picked[1].page_content[:800],
+        )
+        resp = await client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=500,
+        )
+        content = resp.choices[0].message.content.strip()
+        # 去掉可能的 ```json ``` 包裹
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+        questions = json.loads(content)
+        return {"source": source, "questions": questions[:QUESTIONS_PER_DOC]}
+```
+
+**成本**：约 ¥0.2（96 篇 × 1 次 API 调用）
+**时间**：并发 5，约 1~2 分钟
 
 ### 评估脚本核心
 
@@ -69,40 +113,52 @@ def random_baseline(test_set, all_docs, k=3):
     return total / len(test_set)
 ```
 
-### 评估结果（当前 2 个文档 / 102 chunk）
+### 评估结果（96 篇文档 / 550 chunk / 249 测试项）
 
 | 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
 |---|---|---|---|---|
-| 普通相似度 | 100% | 0.87 | 0.96 | 1.37 |
-| MMR | 100% | 0.83 | 0.97 | 1.43 |
-| MMR + 按来源去重 | 100% | 0.77 | 0.97 | **1.57** |
-| 混合检索（带降级 1.0） | 96.7% | 0.86 | 0.94 | 1.30 |
-| **混合检索 + Rerank** | 96.7% | **0.90** | **0.97** | 1.17 |
-| 随机基线 | **84.1%** | — | — | — |
+| 普通相似度 | 56.2% | 0.25 | 0.42 | 2.66 |
+| MMR | 43.0% | 0.17 | 0.36 | 2.81 |
+| MMR + 按来源去重 | 46.6% | 0.16 | 0.37 | **3.00** |
+| 混合检索（带降级 1.0） | 60.2% | 0.27 | 0.47 | 2.59 |
+| **混合检索 + Rerank** | **66.7%** | **0.29** | **0.54** | 2.59 |
+| 随机基线 | **3.5%** | — | — | — |
 
-> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字（含随机基线 + Rerank）。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
+> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字。评估脚本从 `rag_core.search` import 检索函数，和服务端部署的是同一份代码。
 
 ### 关键发现
 
-**1. Rerank 是精确率的最后一块拼图**
+**1. 随机基线从 84.1% 降到 3.5%——判别空间 ×4**
 
-- 混合检索精确率 0.86 → Rerank 后 0.90
-- MRR 0.94 → 0.97
-- **但召回率不变**（Rerank 只重排，不召回）
+- 旧语料：2 篇文档 / 102 chunk / 30 测试项 → 随机基线 84.1%，判别空间 15.9 个点
+- 新语料：96 篇文档 / 550 chunk / 249 测试项 → 随机基线 3.5%，判别空间 **63.2 个点**
+- **旧数字全 100% 是"天花板效应"**——测试集太简单，看不出策略差异
 
-**2. Rerank 收益被语料规模压制**
+**2. Rerank 是精确率的最后一块拼图**
 
-- 只有 2 文档 / 102 chunk，判别空间有限
-- 扩到 500+ chunk 才能发挥 Reranker 全部威力
-- **主动承认这个局限**，比夸张提升更可信
+- 混合检索召回率 60.2% → Rerank 后 **66.7%**（+6.5%）
+- MRR 0.47 → **0.54**（+0.07）
+- **主要提升召回率**——Rerank 把 Top-20 里被埋没的相关 chunk 顶上来
 
-**3. 精确率和多样性呈明显 trade-off**
+**3. 混合检索优于纯相似度**
 
-- 相似度/混合检索：精确率高，多样性低
-- MMR + 去重：多样性最高（1.57），精确率最低（0.77）
-- Rerank 进一步压低多样性（1.17）——只选最相关的
+- 60.2% vs 56.2%（**+4%**）
+- 说明 BM25 补的关键词匹配确实有用
 
-**4. 选哪个策略取决于业务**
+**4. MMR 在"精确匹配"任务上吃亏**
+
+- 召回率只有 43%（低于相似度 56.2%）
+- 但多样性最高（2.81）
+- **多样性导向的代价**——选多角度的结果，但可能漏掉最相关的
+
+**5. 精确率和多样性呈明显 trade-off**
+
+| 策略 | 精确率 | 多样性 |
+|---|---|---|
+| 混合检索 + Rerank | 0.29 | 2.59 |
+| MMR + 去重 | 0.16 | **3.00** |
+
+**6. 选哪个策略取决于业务**
 
 | 场景 | 推荐策略 |
 |---|---|
@@ -110,49 +166,36 @@ def random_baseline(test_set, all_docs, k=3):
 | 需要多角度（如分析任务） | MMR + 去重 |
 | 平衡 | MMR |
 
-### 早期评估（5 个文档 / 24 chunk）
-
-| 策略 | 召回率 | 平均多样性 |
-|---|---|---|
-| 普通相似度 | 29/30 = 97% | 2.00 |
-| MMR | 28/30 = 93% | 2.50 |
-| MMR + 按来源去重 | — | 3.00 |
-
-**核心结论**：MMR 用 4% 的召回率换取 25% 的多样性提升。
-
 ### 失败案例分析
 
-**案例 1**："怎么让回答一个字一个字显示出来？"
-- 期望：`deployment.md`
-- 实际：`langchain.md`、`rag.md`
+**案例 1**：口语化表达
+- 用户问："怎么让回答一个字一个字显示出来？"
+- 期望文档：`readme/04_启动.md`
+- 实际命中：`notes_interview/q05_流式输出怎么实现的.md`
 - 原因：口语化表达和文档术语有语义鸿沟
 
-**案例 2**："多 Agent 系统怎么保证消息不丢？"
-- 期望：`langgraph.md`、`deployment.md`
-- 实际：`langchain.md`、`rag.md`
-- 原因：MMR 强制 chunk 级多样性时挤掉了最相关的文档
+**案例 2**：跨主题问题
+- 用户问："多 Agent 系统怎么保证消息不丢？"
+- 期望文档：`stories/18_故事_17双源记忆打架架构重构.md`
+- 实际命中：`notes_interview/q12_Agent_多轮对话怎么实现.md`
+- 原因：语义相近但主题不同
 
 ### 已知不足
 
 **评估层面**：
-- **文档级召回而非 chunk 级**：用 `source`（文件名）判断命中，只有两三篇文档，命中太容易，含金量不高。生产环境应该标注 chunk id 或关键句。
-- **30 条样本太少**：3% 的差异（97% vs 93%）是一条样本的差别，统计上无意义。应该扩到 200 条以上。
-- **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness。
-- **随机基线 84.1%**：语料太小（2 文档/102 chunk），天花板效应明显，判别空间只有 15.9 个点。**这也是 Rerank 提升有限的原因。**
+- **文档级召回而非 chunk 级**：用 `source`（相对路径）判断命中，同一文档的多个 chunk 算命中。粒度还可以更细
+- **chunk 级标注成本高**：需要人工标注每个问题的"正确 chunk id"，耗时大
+- **没有端到端指标**：检索对了不等于回答对了。应该加 LLM-as-judge 或人工标注的 answer correctness
 
 **架构层面**：
 | 位置 | 问题 | 生产级解法 |
 |---|---|---|
 | `/chat` 和 `/chat/stream` | pymysql 是**同步客户端**，在 async 路径上会阻塞事件循环 | 用 `aiomysql` |
 | `save_conversation` | 每次请求新建连接，没有连接池 | 用连接池（如 `DBUtils`） |
-| ~~`MAX_DISTANCE = 1.1`~~ | ~~阈值校准不够系统，是拍脑袋定的~~ | ✅ 2026-10-10 已修复：标定为 1.0（P=0.967, R=0.967） |
-| 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` 做来源判断 + 显式状态机 |
+| 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` + 显式状态机 |
 | MCP Server 用了私有 API | `vectorstore.docstore._dict` 是内部 API，版本升级可能坏 | 构建索引时自己维护 chunks 列表并 pickle 落盘 |
-| ~~Docker 部署~~ | ~~Dockerfile 缺 COPY docs/，compose 缺 network，host 写死 localhost~~ | ✅ 2026-10-08 已修复 |
-| ~~HF 缓存路径硬编码~~ | ~~`Path.home()/.cache/huggingface/...` 依赖精确路径~~ | ✅ 2026-10-08 已修复：三级探测 |
-| ~~checkpoints 无 volume~~ | ~~`docker compose down` 后记忆全丢~~ | ✅ 2026-10-08 已修复：挂载到 `./data/` |
-| ~~评估代码分叉~~ | ~~评估脚本和服务端各有一份 hybrid_search，参数不一致~~ | ✅ 2026-10-09 已修复：抽到 `rag_core/search.py` |
-| **Rerank 收益被语料规模压制** | **只有 2 文档 102 chunk，判别空间有限** | **扩语料到 500+ chunk** |
+| **Reranker 性能** | CPU 单次 50~100 ms，249 条需 4~8 分钟 | 更小模型 / GPU / 缓存 |
+| **chunk 级评估** | 现在是文档级 | 标注 chunk id |
 
 ### 改进方案
 
@@ -162,7 +205,7 @@ def random_baseline(test_set, all_docs, k=3):
 | 降级策略 | 距离阈值拦截无关问题 | ✅ 已做 |
 | 多指标评估 | 召回率 + 精确率 + MRR + 多样性 | ✅ 已做 |
 | 随机基线 | 组合公式精确计算 | ✅ 已做 |
-| 友好错误提示 | friendly_error 映射（异常类型） | ✅ 已做 |
+| 友好错误提示 | friendly_error 映射 | ✅ 已做 |
 | 删掉无效缓存 | 命中率结构性为 0 | ✅ 已做 |
 | Docker 多阶段构建 | 3.51 GB → 2.42 GB | ✅ 已做 |
 | CPU 版 torch | 下载量 5 GB → 600 MB | ✅ 已做 |
@@ -171,12 +214,12 @@ def random_baseline(test_set, all_docs, k=3):
 | HF_HOME 三级探测 | 本地/容器都能跑 | ✅ 已做 |
 | 抽公共检索模块 | rag_core/search.py | ✅ 已做 |
 | 阈值标定 | 正负样本距离分布 + PR 曲线 | ✅ 已做（MAX_DISTANCE 1.1→1.0） |
-| **Rerank 精排** | **bge-reranker-base 对 Top-20 重排** | ✅ 已做（精确率 0.86→0.90） |
+| Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ✅ 已做（召回率 +6.5%） |
+| **语料扩充** | 2 篇 → 96 篇 | ✅ 已做 |
+| **测试集自动生成** | 30 条 → 249 条 | ✅ 已做 |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
-| 扩充测试集 | 200 条以上 + 置信区间 | ⏳ 待做 |
-| 扩语料 | 500+ chunk，让 Rerank 发挥全部威力 | ⏳ 待做 |
 | 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
 
 ### 面试答题模板
 
-> "我构建了 30 个测试项的 RAG 评估集，故意让问题不含文档关键词。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 102 个 chunk 里随机抽 3 个，命中期望 source 的概率是 84.1%。检索 pipeline 是两阶段：混合检索召回 Top-20（向量 + BM25 + 加权 RRF），再用 bge-reranker-base 交叉编码器精排 Top-3。Rerank 把精确率从 0.86 提到 0.90，MRR 从 0.94 提到 0.97。降级阈值 MAX_DISTANCE 也是标定出来的——正样本 30 条 + 负样本 25 条，扫 101 个候选点选 P/R 平衡点 1.0，幻觉率从 9.1% 降到 3.3%。所有数字都能用 `python eval/eval_retrieval.py` 和 `python eval/calibrate_distance.py` 复现。诚实的局限：Rerank 收益被语料规模压制（只有 2 文档 102 chunk），下一步扩到 500+ chunk 才能发挥全部威力。"
+> "我构建了 249 个测试项的 RAG 评估集，故意让问题不含文档关键词。测试集是通过脚本自动生成的——遍历 96 篇文档的 chunk，每篇挑 2 个最长 chunk，调 DeepSeek API 生成 3 个问题。用了四个指标 + 随机基线：召回率、精确率、MRR、多样性。随机基线用组合公式精确算，从 550 个 chunk 里随机抽 3 个，命中期望 source 的概率是 3.5%。检索 pipeline 是两阶段：混合检索召回 Top-20（向量 + BM25 + 加权 RRF），再用 bge-reranker-base 交叉编码器精排 Top-3。Rerank 把召回率从 60.2% 提到 66.7%，MRR 从 0.47 提到 0.54。降级阈值 MAX_DISTANCE 也是标定出来的——正样本 30 条 + 负样本 25 条，扫 101 个候选点选 P/R 平衡点 1.0，幻觉率从 9.1% 降到 3.3%。所有数字都能用 `python eval/eval_retrieval.py` 复现。**这里有个真实的迭代故事**：我第一版语料只有 2 篇文档、测试集 30 条，随机基线 84.1%——天花板效应让 Rerank 提升看起来只有 +0.04 精确率。**扩语料到 96 篇、测试集到 249 条后**，随机基线降到 3.5%，Rerank 的真实增益才显现出来。"

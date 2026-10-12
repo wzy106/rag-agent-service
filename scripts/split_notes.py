@@ -12,9 +12,10 @@ SPLIT_TASKS = [
     ("LESSONS_LEARNED.md", "docs/stories"),
     ("PROJECT_NOTES.md", "docs/notes"),
     ("README.md", "docs/readme"),
-    ("docs/_old_langchain.md", "docs/langchain"),   # ← 新增：旧笔记
+    # 注：docs/_old_langchain.md 已删除，docs/langchain/ 保留历史拆分结果
+    # 注：PROJECT_NOTES 的「七、面试可能被问的问题」章节已单独拆到 docs/notes_interview/，
+    #     重跑本脚本会覆盖该拆分结果，需要重跑 split_interview.py
 ]
-
 
 def split_by_h2(content: str) -> list:
     """按 '## xxx' 二级标题拆分。返回 [(title, body), ...]"""

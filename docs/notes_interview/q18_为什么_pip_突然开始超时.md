@@ -10,6 +10,3 @@
 - 换阿里云源（比清华稳定）
 - 加 `--timeout 300 --retries 10`
 - **根本解法**：requirements.txt 加 `--extra-index-url https://download.pytorch.org/whl/cpu`，用 CPU 版 torch，下载量从 5 GB → 600 MB
-
-**面试话术**：
-> "pip 超时有时候不是网络问题，是缓存失效。我改了 pip 命令的一个参数，导致 Docker 层缓存失效，本来命中的缓存都要重新下载 5 GB 的 CUDA 全家桶。后来用 CPU 版 torch 把下载量砍到 600 MB。"
