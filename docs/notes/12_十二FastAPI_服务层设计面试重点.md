@@ -222,8 +222,8 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 | Agent 多轮对话怎么实现？ | LangGraph checkpointer + AsyncSqliteSaver + DATA_DIR |
 | 容器重建后记忆怎么不丢？ | checkpoints volume 挂载到宿主机 ./data/ |
 | 错误信息怎么处理？ | `friendly_error` 映射，用异常类型判断 |
-| 检索不到内容怎么处理？ | 距离阈值降级（标定 1.0），返回"没找到"，不调 LLM |
+| 检索不到内容怎么处理？ | 距离阈值降级（标定 0.96），返回“没找到”，不调 LLM |
 | RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 + 随机基线 |
 | 评估怎么保证可复现？ | 抽公共 `rag_core/search.py`，一条命令跑出所有数字 |
-| 阈值怎么定？ | 正负样本距离分布 + PR 曲线标定 |
+| 阈值怎么定？ | 正负样本距离分布 + PR 曲线标定（100 正 + 25 负） |
 | 为什么要 Rerank？ | 双塔召回粗，交叉编码器精排 |

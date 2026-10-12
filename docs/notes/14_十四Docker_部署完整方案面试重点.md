@@ -126,6 +126,8 @@ torch
 
 **2026-10-11**：Rerank 精排 + 语料 2→96 篇 + 测试集 30→249 条
 
+**2026-10-12**：阈值重标定 MAX_DISTANCE 1.0→0.96；notes/07 拆成 25 个独立面试题文件，语料同步为 98 篇 / 576 chunk，RAG 评估更严格
+
 ### 14.5 面试话术（Docker 部署）
 
-> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，3.36 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 1.0，幻觉率从 9.1% 降到 3.3%。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，召回率从 60.2% 提到 66.7%。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
+> “我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，3.36 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 0.96，P=0.990、R=1.000、F1=0.995，幻觉率约 1.0%。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，召回率从 54.6% 提到 60.6%。当前知识库 98 篇文档 / 576 chunk，评估集 249 条，随机基线 3.1%。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。”
