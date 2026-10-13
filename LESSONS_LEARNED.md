@@ -2,7 +2,7 @@
 
 > 记录项目开发过程中遇到的问题、分析过程和解决方案。
 > 每个故事按"问题 → 分析 → 方案 → 收获"结构。
-> 最后更新：2026-10-12（阈值重标定 + notes/07 拆分后评估更严格；MAX_DISTANCE 0.96；语料 98 篇 / 583 chunk；随机基线 3.0%；判别空间 54.0 个点）
+> 最后更新：2026-10-13（新增故事 32：接口裸奔；故事 33：改代码每次 rebuild；MAX_DISTANCE 0.96；语料 98 篇 / 583 chunk；随机基线 3.0%）
 
 ## 快速索引
 
@@ -13,7 +13,7 @@
 | 网络问题 | 故事 3 |
 | 异步编程 | 故事 4、5 |
 | 用户体验 | 故事 6 |
-| 构建优化 | 故事 7、26 |
+| 构建优化 | 故事 7、26、33 |
 | 协议理解 | 故事 8 |
 | 检索算法 | 故事 9、10 |
 | 生产级意识 | 故事 11 |
@@ -22,7 +22,7 @@
 | 评估方法 | 故事 15 |
 | 记忆持久化 | 故事 13、16 |
 | 架构重构 | 故事 17 |
-| 安全防护 | 故事 18 |
+| 安全防护 | 故事 18、32 |
 | 缓存正确性 | 故事 19 |
 | 依赖管理 | 故事 20 |
 | **磁盘与 Docker 环境** | **故事 21、22** |
@@ -34,6 +34,8 @@
 | **阈值拍脑袋定 / 重标定** | **故事 29** |
 | **Rerank 收益被语料压制** | **故事 30** |
 | **测试集太小判别力不足** | **故事 31** |
+| **接口裸奔** | **故事 32** |
+| **改代码每次 rebuild** | **故事 33** |
 
 ---
 
@@ -279,6 +281,9 @@ Dockerfile 的指令顺序影响构建效率。把变化频率低的放前面，
 
 ### 更新（2026-10-08）
 本次构建又踩了新坑——把模型下载放在构建期会导致网络不稳定时构建失败。**最终方案**：模型下载移出构建期，改由运行时 volume 挂载 `hf_cache`。详见故事 26。
+
+### 更新（2026-10-13）
+代码 COPY 进镜像导致"改一行就 rebuild"，磁盘也越吃越多。**最终方案**：开发期 volume 挂载代码/语料/索引，改代码 `docker compose restart` 即可。详见故事 33。
 
 ---
 
@@ -1533,10 +1538,10 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 **③ 改 `docker-compose.yml`：**
 ```yaml
 environment:
-  - DATA_DIR=/app/rag_api/data
+  - DATA_DIR=/app/data
 volumes:
   - ./hf_cache:/root/.cache/huggingface
-  - ./data:/app/rag_api/data       # 新增
+  - ./data:/app/data       # 新增
 ```
 
 **④ 把旧的 db 挪到新位置：**
@@ -1552,7 +1557,7 @@ data/
 ### 验证
 ```cmd
 :: 1. 问一个问题
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"MMR 是什么？\", \"thread_id\": \"p0b_test\"}"
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer your-secret-key-here" -d "{\"message\": \"MMR 是什么？\", \"thread_id\": \"p0b_test\"}"
 
 :: 2. 完全销毁容器
 docker compose down
@@ -1561,7 +1566,7 @@ docker compose down
 docker compose up -d
 
 :: 4. 用代词问
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"它和普通相似度有什么区别？\", \"thread_id\": \"p0b_test\"}"
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer your-secret-key-here" -d "{\"message\": \"它和普通相似度有什么区别？\", \"thread_id\": \"p0b_test\"}"
 ```
 
 **第 4 步能理解"它"= MMR → 记忆持久化生效。**
@@ -1588,7 +1593,7 @@ curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "
 - `docker compose down && up` → 除非有 volume，否则记忆全丢
 
 **面试时能讲**：
-> "Docker 化的一个坑是 checkpoints 持久化。`AsyncSqliteSaver` 默认把 DB 写在容器内部，`docker compose down` 就全丢了。我的做法是用 `DATA_DIR` 环境变量决定路径，compose 里把 `./data` 挂到 `/app/rag_api/data`。本地开发 fallback 到 `rag_api/data/`。验证过：`docker compose down` 后 `up -d`，用代词问，Agent 还能回忆起上一轮。"
+> "Docker 化的一个坑是 checkpoints 持久化。`AsyncSqliteSaver` 默认把 DB 写在容器内部，`docker compose down` 就全丢了。我的做法是用 `DATA_DIR` 环境变量决定路径，compose 里把 `./data` 挂到 `/app/data`。本地开发 fallback 到 `rag_api/data/`。验证过：`docker compose down` 后 `up -d`，用代词问，Agent 还能回忆起上一轮。"
 
 ---
 
@@ -2017,7 +2022,248 @@ MMR + 按来源去重                  40.6%     0.14     0.34     3.00
 - 你能对比新旧数字，而不是只报最好的
 
 **面试时能讲**：
-> "我第一版 RAG 评估只有 30 条测试项，语料只有 2 篇文档。数字看起来很漂亮——所有策略都是 100% 召回率。但我算了一下随机基线——84.1%，意味着随便抽 3 个 chunk 就能命中 84%。这说明我的测试集判别空间只有 15.9 个点，**所有策略都摸到了天花板，看不出差异**。后来我把三个项目笔记按标题拆成多个独立文档、再补上 LangChain 学习笔记，总语料 98 篇 583 chunk。然后写了个脚本用 DeepSeek API 批量生成问题——每篇挑 2 个最长 chunk 生成 3 个问题，成本约两毛钱。扩到 249 条测试项后，随机基线降到 3.0%，判别空间扩到 54.0 个点。**这时候数字才真实**：相似度 50.6%、混合检索 52.6%、加 Rerank 57.0%。Rerank 的真实增益也显现出来——召回率 +4.4%、MRR +0.05，是之前那个'30 条版本'的 3 倍。"
+> "我第一版 RAG 评估只有 30 条测试项，语料只有 2 篇文档。数字看起来很漂亮——所有策略都是 100% 召回率。但我算了一下随机基线——84.1%，意味着随便抽 3 个 chunk 就能命中 84%。这说明我的测试集判别空间只有 15.9 个点，**所有策略都摸到了天花板，看不出差异**。后来我把三个项目笔记按标题拆成多个独立文档、再补上 LangChain 学习笔记，总语料 98 篇 583 chunk。然后写了个脚本用 DeepSeek API 批量生成问题——每篇挑 2 个最长 chunk 生成 3 个问题，成本约两毛钱。扩到 249 条测试项后，随机基线降到 3.0%，判别空间扩到 54.0 个点。**这时候数字才真实**：相似度 50.6%、混合检索 52.6%、加 Rerank 57.0%。Rerank 的真实增益也显现出来——召回率 +4.4%、MRR +0.05。"
+
+---
+
+## 故事 32：接口裸奔（安全防护 2，2026-10-13）
+
+### 问题
+`/chat` 和 `/chat/stream` 从一开始就是**完全裸奔**的——任何人只要知道 URL 就能调。项目做了记忆持久化、错误信息脱敏、幻觉防护，但最外层的大门一直开着。
+
+面试官一问"你的接口怎么防滥用"，只能答"没做"。
+
+### 分析
+**为什么没做**：
+- 本地跑着玩，没人会攻击
+- 做鉴权要配环境变量、写校验逻辑、改接口签名，看起来"没必要"
+
+**为什么必须做**：
+- 面试官问的不是"有没有被攻击"，而是"**有没有生产级意识**"
+- 玩具项目：接口直接暴露
+- 生产项目：任何对外接口都要考虑"谁能调、调多少次、出错怎么处理"
+- 加了不只是防攻击，更是**证明你知道生产环境长什么样**
+
+### 方案
+
+**① FastAPI 侧：`Header` + `Depends`**
+
+```python
+from fastapi import FastAPI, HTTPException, Header, Depends
+
+API_KEY = os.getenv("API_KEY", "dev-key-change-me")
+
+async def verify_key(authorization: str = Header(default="")):
+    if not authorization:
+        raise HTTPException(401, detail="缺少 Authorization 头")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, detail="Authorization 格式错误")
+    token = authorization[7:].strip()
+    if token != API_KEY:
+        raise HTTPException(403, detail="API Key 无效")
+```
+
+**② 接口挂上依赖**
+
+```python
+@app.post("/chat")
+async def chat(payload: ChatRequest, _: None = Depends(verify_key)):
+    ...
+```
+
+请求进 `/chat` 前，FastAPI 先跑 `verify_key`。抛异常就拦截，正常返回才进业务。
+
+**③ `docker-compose.yml` 注入**
+
+```yaml
+environment:
+  - API_KEY=${API_KEY:-dev-key-change-me}
+```
+
+从宿主机 `.env` 读，读不到用默认值。
+
+**④ `.env` 加一行**
+
+```text
+API_KEY=your-secret-key-here
+```
+
+### 验证
+
+```cmd
+:: 不带 token → 401
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message":"MMR 是什么？"}'
+{"detail":"缺少 Authorization 头"}
+
+:: 错误 token → 403
+curl ... -H "Authorization: Bearer wrong" ...
+{"detail":"API Key 无效"}
+
+:: 正确 token → 200
+curl ... -H "Authorization: Bearer your-secret-key-here" ...
+{"reply":"..."}
+```
+
+三条全过。
+
+### 关键设计
+
+| 点 | 说明 |
+|---|---|
+| `Header` | FastAPI 自动从请求头取值 |
+| `Depends` | 依赖注入，一次定义、多处复用 |
+| `401` vs `403` | 401 = 没带凭证；403 = 带了但不对 |
+| `API_KEY` 环境变量 | 密码外置，代码里不出现真实密钥 |
+| `${API_KEY:-默认}` | compose 从宿主机读，注入容器 |
+| `/history` 保持公开 | 展示层不需要鉴权 |
+
+### 收获
+**鉴权不是为了防真实攻击，是为了证明你有生产级意识。** 面试官看的是"你知道生产环境长什么样"，而不是"你的玩具项目有没有被入侵"。
+
+**用 `Depends` 而不是手动调**：鉴权逻辑抽出来，`/chat` 和 `/chat/stream` 共用一份，改一处两端生效。这是"单一职责"在框架层的体现。
+
+**面试时能讲**：
+> "接口加了 API Key 鉴权。用 FastAPI 的 `Header` + `Depends` 做依赖注入，`/chat` 和 `/chat/stream` 共用同一个 `verify_key`，鉴权逻辑和业务逻辑解耦。`API_KEY` 从环境变量读——本地 `.env` 一份，生产服务器一份，代码里不出现真实密钥。`docker-compose.yml` 里用 `${API_KEY:-dev-key-change-me}` 语法从宿主机读取，读不到用默认值。"
+
+---
+
+## 故事 33：改代码每次 rebuild（2026-10-13）
+
+### 问题
+项目把 `api_agent.py` 和 `mcp_rag_server.py` 通过 `COPY` 打进镜像：
+
+```dockerfile
+COPY rag_api/api_agent.py ./rag_api/api_agent.py
+COPY mcp_test/mcp_rag_server.py ./mcp_test/mcp_rag_server.py
+COPY docs/ ./docs/
+COPY faiss_index/ ./faiss_index/
+```
+
+每次改一行代码，都要：
+
+```cmd
+docker compose down
+docker compose build      # 2~5 秒到几分钟
+docker compose up -d
+```
+
+**磁盘越吃越多，迭代越来越慢。**
+
+### 分析
+**为什么 `COPY` 会导致 rebuild**：
+- `COPY` 把文件**打进镜像层**
+- 文件内容变了 → 这一层的 hash 变了 → 后续所有层缓存失效
+- 必须重新 build
+
+**磁盘为什么涨**：
+- 每次 build 生成新层
+- 旧层变"悬空镜像"（dangling image）
+- 不像 Git，Docker 不会自动清理
+
+**实测**：项目磁盘 `docker system df` 显示：
+
+```
+Images          7         3         28.31GB   17.06GB (60%)
+Build Cache     22        0         11.01GB   0B
+```
+
+镜像可回收 17 GB，缓存 11 GB。折腾几轮就吃掉几十 GB。
+
+### 方案
+**开发期把频繁变动的目录改成 volume 挂载**：
+
+```yaml
+volumes:
+  - ./hf_cache:/root/.cache/huggingface
+  - ./data:/app/data
+  # === 开发期挂载：改代码不用 rebuild ===
+  - ./rag_api:/app/rag_api
+  - ./mcp_test:/app/mcp_test
+  - ./rag_core:/app/rag_core
+  - ./docs:/app/docs
+  - ./faiss_index:/app/faiss_index
+```
+
+**关键调整**：`DATA_DIR` 从 `/app/rag_api/data` 改成 `/app/data`。
+
+因为 `./rag_api` 整个挂到 `/app/rag_api`，原来的 `./data:/app/rag_api/data` 会和它冲突。分开后互不影响。
+
+**Dockerfile 不动**，`COPY` 保留作为"生产模式"的 fallback。
+
+### 效果对比
+
+| 改了什么 | 挂载前 | 挂载后 |
+|---|---|---|
+| `api_agent.py` | `down` + `build` + `up` | `docker compose restart agent-api` |
+| `docs/` | `down` + `build` + `up` | restart |
+| `faiss_index/` | `down` + `build` + `up` | restart |
+| 时间 | 几秒到几分钟 | 2~3 秒 |
+| 磁盘 | 每次涨 | 零增长 |
+
+### 验证
+
+改 `api_agent.py`：
+
+```python
+return {"message": "Agent API v2（挂载生效）"}
+```
+
+**不要 build**，直接：
+
+```cmd
+docker compose restart agent-api
+curl http://127.0.0.1:8000/
+{"message":"Agent API v2（挂载生效）"}
+```
+
+挂载生效。
+
+### 收尾时改回 COPY
+
+项目结束、要交付时，把开发挂载注释掉：
+
+```yaml
+volumes:
+  - ./hf_cache:/root/.cache/huggingface
+  - ./data:/app/data
+  # === 开发期挂载，收尾时注释掉 ===
+  # - ./rag_api:/app/rag_api
+  # - ./mcp_test:/app/mcp_test
+  # - ./rag_core:/app/rag_core
+  # - ./docs:/app/docs
+  # - ./faiss_index:/app/faiss_index
+```
+
+重新 build：
+
+```cmd
+docker compose down
+docker compose build
+docker compose up -d
+```
+
+镜像就是"冻结"的、自包含的，不依赖宿主机文件。
+
+### 为什么这么设计
+
+| 阶段 | 用哪种 | 原因 |
+|---|---|---|
+| 开发 | volume 挂载 | 迭代快，磁盘不涨 |
+| 生产 | COPY 进镜像 | 可复现，不依赖宿主机文件 |
+
+这是 Docker 的标准做法。**开发期追求迭代速度，生产期追求可复现性。**
+
+### 收获
+**Docker 是分层缓存，但每次内容变了都会新增一层。** 频繁改动的文件不该用 `COPY`，而应该挂载。
+
+**开发用挂载，生产用 COPY。** 这不是"哪个更好"，而是"哪个适合当前阶段"。
+
+**磁盘爆炸是渐进式的。** `docker system df` 一看就知道——镜像 28 GB、缓存 11 GB，大部分是历史版本。每次 build 都涨，清理要手动。
+
+**关键调整：`DATA_DIR` 要跟着改。** 挂载 `./rag_api` 后，原来的 `./data:/app/rag_api/data` 冲突。改成 `/app/data` 就分开了。
+
+**面试时能讲**：
+> "开发期我把代码和语料目录挂载进容器，改代码只要 `docker compose restart`，不用 rebuild。因为项目早期每次改一行都要 build，磁盘也越吃越多——`docker system df` 一看，镜像 28 GB、缓存 11 GB。挂载后改代码 2 秒生效，磁盘零增长。收尾时把挂载注释掉重新 build，镜像就是自包含的，不依赖宿主机文件。开发期追求迭代速度，生产期追求可复现性。"
 
 ---
 
@@ -2032,16 +2278,16 @@ MMR + 按来源去重                  40.6%     0.14     0.34     3.00
 | 网络问题 | 第三方库默认行为要显式关闭 |
 | 异步编程 | 异步框架下初始化放 lifespan，工具链全程异步 |
 | 用户体验 | 流式输出要区分内部过程和用户可见内容 |
-| 构建优化 | Dockerfile 指令顺序影响缓存效率；多阶段构建瘦身 |
+| 构建优化 | Dockerfile 指令顺序影响缓存效率；多阶段构建瘦身；开发期用挂载 |
 | 协议理解 | stdio 通信要用 stderr 打日志 |
 | 检索算法 | 混合检索要调权重，MMR 是 chunk 级多样性 |
-| 生产级意识 | Agent 要有护栏，记忆要持久化 |
+| 生产级意识 | Agent 要有护栏，记忆要持久化，接口要鉴权 |
 | 功能演进回归 | 加新功能要检查旧设计的假设是否还成立 |
 | 幻觉治理 | Prompt 软约束 + 检索层硬降级，两层防护 |
 | 评估方法 | 单一指标会误导，要多个指标一起看 |
 | 记忆持久化 | 让 checkpointer 管历史，不要在框架外面手动糊一层 |
 | 架构重构 | 发现职责重叠就统一到单一真相源 |
-| 安全防护 | 服务端日志记详细，客户端响应给友好提示 |
+| 安全防护 | 服务端日志记详细，客户端响应给友好提示；接口加鉴权 |
 | 缓存正确性 | 缓存不是免费午餐，命中率结构性为 0 就删掉 |
 | 依赖管理 | requirements.txt 必须经过干净环境验证 |
 | **磁盘与 Docker 环境** | **Docker 构建失败先查磁盘空间；WSL2 vhdx 默认在 C 盘要迁走** |
@@ -2053,5 +2299,7 @@ MMR + 按来源去重                  40.6%     0.14     0.34     3.00
 | **阈值拍脑袋定 / 重标定** | **超参数要么标定，要么写清楚是拍的；标定脚本比阈值本身更有价值；语料扩展后要重标定** |
 | **Rerank 收益被语料压制** | **精排有效，但小语料天花板低；扩语料才能发挥全部威力** |
 | **测试集太小判别力不足** | **30 条样本 + 2 篇文档 → 随机基线 84.1%，判别空间 15.9 个点；扩到 249 条 + 98 篇 / 583 chunk → 随机基线 3.0%，判别空间 54.0 个点** |
+| **接口裸奔** | **生产环境必须有鉴权；用 FastAPI 的 Depends 做依赖注入，鉴权逻辑和业务解耦** |
+| **改代码每次 rebuild** | **开发期 volume 挂载，生产期 COPY 冻结；频繁变动的文件不该打进镜像** |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**

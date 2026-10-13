@@ -6,7 +6,7 @@ import pymysql
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -22,6 +22,19 @@ load_dotenv(env_path)
 # ===== 护栏配置 =====
 RECURSION_LIMIT = 10
 MAX_TOKENS = 2000
+
+# ===== API Key 鉴权 =====
+API_KEY = os.getenv("API_KEY", "dev-key-change-me")
+
+async def verify_key(authorization: str = Header(default="")):
+    """校验 Bearer token。"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="缺少 Authorization 头")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization 格式错误，应为 'Bearer <token>'")
+    token = authorization[7:].strip()
+    if token != API_KEY:
+        raise HTTPException(status_code=403, detail="API Key 无效")
 
 # ===== 友好错误提示 =====
 def friendly_error(e: Exception) -> str:
@@ -153,7 +166,7 @@ def root():
     return {"message": "Agent API is running"}
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(payload: ChatRequest):
+async def chat(payload: ChatRequest, _: None = Depends(verify_key)):
     thread_id = payload.thread_id
 
     config = {
@@ -217,7 +230,7 @@ class StreamRequest(BaseModel):
     thread_id: str = "user_001"
 
 @app.post("/chat/stream")
-async def chat_stream(payload: StreamRequest):
+async def chat_stream(payload: StreamRequest, _: None = Depends(verify_key)):
     start_time = time.time()
     thread_id = payload.thread_id
     print(f"[请求] 收到消息：{payload.message}（thread_id={thread_id}）")
