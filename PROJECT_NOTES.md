@@ -2,11 +2,11 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
-> 最后更新：2026-10-13（加 API Key 鉴权 + 开发期 volume 挂载；语料 98 篇 / 583 chunk；MAX_DISTANCE 0.96；随机基线 3.0%）
+> 最后更新：2026-10-14（加 Redis 限流；语料 98 篇 / 583 chunk；MAX_DISTANCE 0.96；随机基线 3.0%）
 
 ## 一、项目简介（30 秒版本）
 
-基于 LangGraph + MCP + RAG 的企业级 Agent 服务，用 FastAPI 提供 HTTP 接口，支持 SSE 流式输出，API Key 鉴权，Docker 容器化部署。检索用"混合检索 + Rerank"两阶段 pipeline，知识库 98 篇文档 / 583 chunk，测试集 249 条。
+基于 LangGraph + MCP + RAG 的企业级 Agent 服务，用 FastAPI 提供 HTTP 接口，支持 SSE 流式输出，API Key 鉴权，Redis 限流，Docker 容器化部署。检索用"混合检索 + Rerank"两阶段 pipeline，知识库 98 篇文档 / 583 chunk，测试集 249 条。
 
 ## 二、架构图
 
@@ -15,6 +15,7 @@
     ↓ HTTP POST /chat/stream  （带 Bearer token）
 FastAPI（api_agent.py）
     ↓ verify_key 鉴权
+    ↓ rate_limit 限流检查
     ↓ agent.astream()
 ┌──────────────────────────────────┐
 │  Agent 循环（LangGraph 状态图）    │
@@ -61,6 +62,11 @@ FastAPI（api_agent.py）
 - Header + Depends 做依赖注入，鉴权逻辑和业务逻辑解耦
 - API_KEY 从环境变量读，代码里不出现真实密钥
 
+限流层：
+- Redis 固定窗口限流（incr + expire）
+- 按 API Key 限流，默认 20 次/分钟
+- Redis 不可用时放行（fail-open），限流不能成为新的单点故障
+
 记忆层：
 - LangGraph checkpointer 按 thread_id 管状态（唯一真相源）
 - AsyncSqliteSaver 持久化到 SQLite 文件（重启不丢）
@@ -69,8 +75,6 @@ FastAPI（api_agent.py）
 
 缓存层：
 - 暂时没有缓存。历史版本用过 Redis，但命中率结构性为 0，已删除。
-- Redis 依赖保留在 requirements.txt 和 docker-compose.db.yml 中，
-  下一步计划用于限流（incr + expire）。
 ```
 
 ## 三、技术栈
@@ -85,6 +89,7 @@ FastAPI（api_agent.py）
 | 检索 | sentence-transformers + FAISS + BM25 + 加权 RRF + Rerank |
 | 降级 | 向量距离阈值（标定 0.96，避免幻觉） |
 | 鉴权 | Bearer token + FastAPI Depends |
+| 限流 | Redis 固定窗口（`incr + expire`），按 API Key |
 | 记忆持久化 | AsyncSqliteSaver（生产可换 PostgresSaver） |
 | 展示层 | MySQL（对话历史，只读） |
 | 服务 | FastAPI + Uvicorn |
@@ -95,6 +100,7 @@ FastAPI（api_agent.py）
 
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启/容器重建都不丢
 - **API Key 鉴权**：`/chat` 和 `/chat/stream` 需要 Bearer token；`Header` + `Depends` 依赖注入
+- **Redis 限流**：按 API Key 限流，20 次/分钟（`incr + expire` 固定窗口，fail-open）
 - RAG 检索增强（本地 embedding + FAISS 向量库，98 篇 / 583 chunk）
 - **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
 - 混合检索（向量 + BM25 + 加权 RRF）
@@ -410,6 +416,7 @@ MAX_DISTANCE = 0.96
 | **拆笔记文件 chunk 太集中** | `notes/07` 一个文件 74 chunks（含 25 道面试题） | 按 `###` 拆成 25 个独立文件，判别力提升 |
 | **接口裸奔** | 一开始没加鉴权，任何人都能调 | Bearer token + FastAPI `Depends` 依赖注入；`API_KEY` 从环境变量读 |
 | **改代码每次 rebuild** | 代码/语料通过 COPY 打进镜像，改一行就要 rebuild | 开发期 volume 挂载，改代码 `docker compose restart` 即可；收尾时改回 COPY |
+| **限流未做** | Redis 依赖一直是"预留"，从没真正用过 | 按 API Key 限流（`incr + expire`），fail-open |
 
 ## 七、面试可能被问的问题（附答案要点）
 
@@ -483,7 +490,7 @@ MAX_DISTANCE = 0.96
 - Agent 改用异步（astream / ainvoke）
 - MCP Server 常驻，不用每次启动
 - 向量库换 FAISS / Chroma 持久化版本
-- 加 Redis 限流（incr + expire）
+- **加 Redis 限流（incr + expire）—— 已落地**
 - 多 worker 部署（uvicorn --workers N 或 gunicorn）
 - 反向代理（Nginx）分担负载
 - **Reranker 是瓶颈**：单条 query 精排约 50~100 ms（CPU），249 条需 4~8 分钟；高并发可换更小 Reranker 或加缓存
@@ -658,7 +665,6 @@ def friendly_error(e: Exception) -> str:
 ### 16. 如果让你重做，会改什么？
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
-- 加限流（Redis `incr + expire`）
 - 加 LangSmith 可观测性
 - 写单元测试和集成测试
 - **评估升级到 chunk 级标注**（现在是文档级）
@@ -891,7 +897,7 @@ from rag_core.search import hybrid_search, ...
 ```python
 API_KEY = os.getenv("API_KEY", "dev-key-change-me")
 
-async def verify_key(authorization: str = Header(default="")):
+async def verify_key(authorization: str = Header(default="")) -> str:
     if not authorization:
         raise HTTPException(401, detail="缺少 Authorization 头")
     if not authorization.startswith("Bearer "):
@@ -899,9 +905,10 @@ async def verify_key(authorization: str = Header(default="")):
     token = authorization[7:].strip()
     if token != API_KEY:
         raise HTTPException(403, detail="API Key 无效")
+    return token
 
 @app.post("/chat")
-async def chat(payload: ChatRequest, _: None = Depends(verify_key)):
+async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
     ...
 ```
 
@@ -914,6 +921,7 @@ async def chat(payload: ChatRequest, _: None = Depends(verify_key)):
 | `401` vs `403` | 401 = 没带凭证；403 = 带了但不对 |
 | `API_KEY` 环境变量 | 密码外置，代码里不出现真实密钥 |
 | `${API_KEY:-默认}` | compose 从宿主机读，注入容器 |
+| `verify_key` 返回 token | 供后续限流用 |
 
 **面试话术**：
 > "接口加了 API Key 鉴权。用 FastAPI 的 `Header` + `Depends` 做依赖注入，`/chat` 和 `/chat/stream` 共用同一个 `verify_key`，鉴权逻辑和业务逻辑解耦。`API_KEY` 从环境变量读——本地 `.env` 一份，生产服务器一份，代码里不出现真实密钥。`docker-compose.yml` 里用 `${API_KEY:-dev-key-change-me}` 语法从宿主机读取，读不到用默认值。这样 yml 文件能安全提交，真实密码留在 `.env` 里。"
@@ -949,6 +957,68 @@ volumes:
 **面试话术**：
 > "开发期我把代码和语料目录挂载进容器，改代码只要 `docker compose restart`，不用 rebuild。因为项目早期每次改一行都要 build，磁盘也越吃越多——`docker system df` 一看，镜像 28 GB、缓存 11 GB。挂载后改代码 2 秒生效，磁盘零增长。收尾时把挂载注释掉重新 build，镜像就是自包含的，不依赖宿主机文件。开发期追求迭代速度，生产期追求可复现性。"
 
+### 28. Redis 限流怎么做的？
+
+**问题**：加了鉴权只防"谁能调"，不防"调多少次"。一个 Key 可以无限打。
+
+**方案**：固定窗口限流，按 API Key 计，20 次/分钟。
+
+```python
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
+
+def rate_limit(key: str):
+    try:
+        r = _get_redis()
+        redis_key = f"rate:{key}"
+        current = r.incr(redis_key)
+        if current == 1:
+            r.expire(redis_key, 60)   # 第一次访问设置 60 秒过期
+        if current > RATE_LIMIT_PER_MINUTE:
+            raise HTTPException(429, detail="请求过于频繁...")
+    except HTTPException:
+        raise
+    except redis.RedisError as e:
+        print(f"[限流] Redis 不可用，放行：{e}")
+```
+
+**接口挂上**：
+
+```python
+@app.post("/chat")
+async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
+    rate_limit(token)
+    ...
+```
+
+**关键设计**：
+
+| 点 | 说明 |
+|---|---|
+| 维度 | 按 API Key 限流，复用鉴权拿到的 token |
+| 算法 | 固定窗口（`incr + expire`），不做滑动窗口 |
+| fail-open | Redis 挂了放行，限流不能成为新单点 |
+| 配额 | 环境变量 `RATE_LIMIT_PER_MINUTE`，默认 20 |
+| `/history` 不限流 | 展示层流量小 |
+
+**验证**：
+
+```cmd
+for /L %i in (1,1,21) do @curl.exe ... -w "%i : %{http_code}\n" ...
+:: 前 20 次 200，第 21 次 429
+```
+
+Redis 计数器：
+
+```cmd
+docker exec -it agent-redis redis-cli get "rate:wzyyqw106"
+:: "21"
+docker exec -it agent-redis redis-cli ttl "rate:wzyyqw106"
+:: 47
+```
+
+**面试话术**：
+> "我把 Redis 从'预留'变成'落地'——按 API Key 限流，20 次/分钟。用 `incr + expire` 做固定窗口，比滑动窗口简单，够用。关键设计是 **fail-open**：Redis 挂了就放行，限流是保护措施，不能让它成为新的单点故障。鉴权 + 限流是生产环境的两层保护：鉴权防'谁能调'，限流防'调多少次'。"
+
 ## 八、项目数据（面试时能报的具体数字）
 
 - 工具数量：1 个（search_knowledge）
@@ -963,6 +1033,7 @@ volumes:
 - 幻觉率：约 1.0%，漏答 0%（新标定）
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 鉴权：Bearer token（`/chat` 和 `/chat/stream`），`API_KEY` 从环境变量读
+- 限流：Redis 固定窗口（`incr + expire`），按 API Key 限流 20 次/分钟，fail-open
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
 - 展示层：MySQL（表 conversations）
 - **评估集：249 个测试项（自动生成），覆盖 83 篇文档**
@@ -979,6 +1050,7 @@ volumes:
 - `DATA_DIR=/app/data`（从 `/app/rag_api/data` 改过来，避免和 `rag_api` 挂载冲突）
 - data/ 目录：`.gitignore` 已忽略
 - 公共模块：`rag_core/search.py`（服务端 + 评估脚本共用）
+- Redis 服务：`redis:7` 镜像，容器名 `agent-redis`，端口 6379
 - 评估可复现：`python eval/eval_retrieval.py` 一条命令跑出所有数字
 - 测试集自动生成：`python scripts/generate_testset.py`（成本约 ¥0.2）
 - 阈值标定：`python eval/calibrate_distance.py`（正样本 100 + 负样本 25）
@@ -990,17 +1062,19 @@ volumes:
 3. 测流式对话：POST /chat/stream（带 Bearer token）
 4. 查看对话历史：GET /history?thread_id=user_001（无需鉴权）
 5. **演示鉴权**：不带 token → 401；错误 token → 403；正确 token → 200
-6. **演示持久化记忆**：问"MMR 是什么" → **`docker compose down` 完全销毁容器** → `up -d` → 问"它和普通相似度有什么区别" → 仍能理解
-7. 演示会话隔离：换 thread_id 问"它是什么"
-8. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
-9. 用浏览器打开 client.html，看打字机效果
-10. 展示 Docker 一键启动：`docker compose up -d`
-11. **展示评估可复现**：`python eval/eval_retrieval.py` → 输出 5 种策略 + 3.0% 随机基线
-12. **展示阈值标定**：`python eval/calibrate_distance.py` → 输出正负样本距离分布 + PR 曲线
-13. **展示测试集自动生成**：`python scripts/generate_testset.py` → 从 98 篇文档生成 249 条测试项
-14. **展示两阶段检索日志**：`docker logs agent-api` → 看到 `[Rerank] 候选 20 条 → Top-3`
-15. **展示开发期热更新**：改一行代码 → `docker compose restart agent-api` → 生效，不用 build
-16. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
+6. **演示限流**：连打 21 次 → 前 20 次 200，第 21 次 429
+7. **演示持久化记忆**：问"MMR 是什么" → **`docker compose down` 完全销毁容器** → `up -d` → 问"它和普通相似度有什么区别" → 仍能理解
+8. 演示会话隔离：换 thread_id 问"它是什么"
+9. 演示降级策略：问"今天天气怎么样？" → 返回"知识库中没有找到相关信息"
+10. 用浏览器打开 client.html，看打字机效果
+11. 展示 Docker 一键启动：`docker compose up -d`
+12. **展示评估可复现**：`python eval/eval_retrieval.py` → 输出 5 种策略 + 3.0% 随机基线
+13. **展示阈值标定**：`python eval/calibrate_distance.py` → 输出正负样本距离分布 + PR 曲线
+14. **展示测试集自动生成**：`python scripts/generate_testset.py` → 从 98 篇文档生成 249 条测试项
+15. **展示两阶段检索日志**：`docker logs agent-api` → 看到 `[Rerank] 候选 20 条 → Top-3`
+16. **展示开发期热更新**：改一行代码 → `docker compose restart agent-api` → 生效，不用 build
+17. **展示 Redis 计数器**：`docker exec -it agent-redis redis-cli get "rate:<token>"`
+18. 展示 GitHub 仓库：https://github.com/wzy106/rag-agent-service
 
 ## 十、RAG 延伸知识点（面试加分）
 
@@ -1076,7 +1150,7 @@ volumes:
 - 混合检索：两者加权合并，取长补短
 - RRF 是标准合并算法，公式 `Σ 权重/(k+排名)`
 
-## 十一、MySQL 展示层 + Redis 预留（工程化）
+## 十一、MySQL 展示层 + Redis 限流（工程化）
 
 ### 为什么还需要 MySQL
 
@@ -1088,7 +1162,7 @@ volumes:
 **角色划分**：
 - **checkpointer（SQLite）**：Agent 的记忆，唯一真相源
 - **MySQL**：只做展示层，给 `/history` 接口用
-- **Redis**：暂时不用，预留做限流
+- **Redis**：限流（已落地，`incr + expire`）
 
 ### MySQL 对话历史（展示层）
 
@@ -1115,26 +1189,51 @@ CREATE TABLE conversations (
 - MySQL 写入包 try/except，失败只打日志
 - `/history` 接口加 `limit` 上限保护（最大 100）
 
-### Redis 预留说明
+### Redis 限流（已落地）
 
-**当前没用**。历史版本用过 Redis 缓存，但实测发现：
-- 缓存 key 用 `context_version` 做版本号
-- `context_version` = MySQL 消息数，每轮 +2
-- 同一问题第二次必然 miss，**命中率结构性为 0**
-- 是负优化，已删除
+**从预留到落地**：原来 Redis 依赖只是"留着备用"，现在正式用于限流。
 
-**下一步计划**：
-- 用于限流（`incr` + `expire`）
-- 或用于分布式缓存（多实例共享）
+**方案**：固定窗口，按 API Key 限流，默认 20 次/分钟。
 
-**为什么保留依赖**：
-- `requirements.txt` 和 `docker-compose.db.yml` 里还留着
-- 将来加限流时不用重新配置
+```python
+def rate_limit(key: str):
+    try:
+        r = _get_redis()
+        redis_key = f"rate:{key}"
+        current = r.incr(redis_key)
+        if current == 1:
+            r.expire(redis_key, 60)
+        if current > RATE_LIMIT_PER_MINUTE:
+            raise HTTPException(429, detail="请求过于频繁...")
+    except HTTPException:
+        raise
+    except redis.RedisError as e:
+        print(f"[限流] Redis 不可用，放行：{e}")
+```
+
+**关键设计**：
+
+| 点 | 说明 |
+|---|---|
+| 维度 | 按 API Key 限流，复用鉴权拿到的 token |
+| 算法 | 固定窗口（incr + expire），简单够用 |
+| fail-open | Redis 挂了放行，限流不能挂掉主流程 |
+| 配额 | 环境变量 `RATE_LIMIT_PER_MINUTE`，默认 20 |
+| `/history` 不限流 | 展示层流量小 |
+
+**为什么保留依赖并落地**：
+- 之前删缓存后，Redis 依赖成了"占位符"
+- 限流是 Redis 的经典场景，30 行代码就能落地
+- "预留做限流" → "已经做了限流"，是两种信誉
 
 ### 完整数据流（当前版本）
 
 ```text
-用户提问（带 thread_id）
+用户提问（带 thread_id + Bearer token）
+    ↓
+verify_key 鉴权（错误 → 401/403）
+    ↓
+rate_limit 限流（超限 → 429；Redis 挂了 → 放行）
     ↓
 调 Agent（checkpointer 自动加载历史）
     ↓
@@ -1150,7 +1249,8 @@ CREATE TABLE conversations (
 | 对话历史怎么持久化？ | LangGraph checkpointer + AsyncSqliteSaver |
 | MySQL 用来做什么？ | 展示层，给 /history 接口用 |
 | 为什么删掉 Redis 缓存？ | 命中率结构性为 0，是负优化 |
-| 为什么不删 Redis 依赖？ | 预留做限流（incr + expire） |
+| Redis 现在用来做什么？ | 限流（incr + expire），按 API Key 限流 20/分钟 |
+| 限流为什么 fail-open？ | 限流是保护措施，Redis 挂了放行，不能成为新单点 |
 | 多实例部署怎么共享状态？ | checkpointer 换 PostgresSaver；限流用 Redis |
 
 ### 可优化方向
@@ -1158,6 +1258,7 @@ CREATE TABLE conversations (
 - Redis 加密码和连接池，生产环境必须
 - 用连接池代替每次新建 MySQL 连接（性能优化）
 - MySQL 写入改异步（aiomysql）
+- 限流算法升级：固定窗口 → 滑动窗口 / 令牌桶（当前规模不需要）
 
 ## 十二、FastAPI 服务层设计（面试重点）
 
@@ -1378,7 +1479,7 @@ async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
 ```python
 API_KEY = os.getenv("API_KEY", "dev-key-change-me")
 
-async def verify_key(authorization: str = Header(default="")):
+async def verify_key(authorization: str = Header(default="")) -> str:
     if not authorization:
         raise HTTPException(401, detail="缺少 Authorization 头")
     if not authorization.startswith("Bearer "):
@@ -1386,9 +1487,10 @@ async def verify_key(authorization: str = Header(default="")):
     token = authorization[7:].strip()
     if token != API_KEY:
         raise HTTPException(403, detail="API Key 无效")
+    return token
 
 @app.post("/chat")
-async def chat(payload: ChatRequest, _: None = Depends(verify_key)):
+async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
     ...
 ```
 
@@ -1420,6 +1522,60 @@ curl ... -H "Authorization: Bearer your-secret-key-here" ...
 
 **面试能讲**：从"裸奔"到"有鉴权"，是生产化的第一步。用 `Depends` 让鉴权逻辑和业务逻辑解耦，`/chat` 和 `/chat/stream` 共用同一个 `verify_key`。`API_KEY` 从环境变量读，本地 `.env` 一份、生产服务器一份，代码里不出现真实密钥。
 
+### 10.5 Redis 限流
+
+**问题**：加了鉴权只防"谁能调"，不防"调多少次"。一个 Key 可以无限打。
+
+**方案**：固定窗口限流，按 API Key 计，20 次/分钟。
+
+```python
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
+
+def rate_limit(key: str):
+    try:
+        r = _get_redis()
+        redis_key = f"rate:{key}"
+        current = r.incr(redis_key)
+        if current == 1:
+            r.expire(redis_key, 60)
+        if current > RATE_LIMIT_PER_MINUTE:
+            raise HTTPException(429, detail="请求过于频繁...")
+    except HTTPException:
+        raise
+    except redis.RedisError as e:
+        print(f"[限流] Redis 不可用，放行：{e}")
+```
+
+**接口挂上**：
+
+```python
+@app.post("/chat")
+async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
+    rate_limit(token)
+    ...
+```
+
+`verify_key` 从 `-> None` 改成 `-> str`，返回 token 供限流用。
+
+**关键设计**：
+
+| 点 | 说明 |
+|---|---|
+| 维度 | 按 API Key 限流，复用鉴权拿到的 token |
+| 算法 | 固定窗口（`incr + expire`），不做滑动窗口 |
+| fail-open | Redis 挂了放行，限流不能成为新单点 |
+| 配额 | 环境变量 `RATE_LIMIT_PER_MINUTE`，默认 20 |
+| `/history` 不限流 | 展示层流量小 |
+
+**验证**：
+
+```cmd
+for /L %i in (1,1,21) do @curl.exe ... -w "%i : %{http_code}\n" ...
+:: 前 20 次 200，第 21 次 429
+```
+
+**面试话术**：从"预留依赖"到"真实使用"，Redis 的角色从"负优化"（之前删掉的缓存）变成"限流"。用 `incr + expire` 做固定窗口，比滑动窗口简单，够用。**Redis 挂了要放行**——限流是保护措施，不能让它成为新的单点故障。鉴权 + 限流是生产环境的两层保护：鉴权防"谁能调"，限流防"调多少次"。
+
 ### 11. 面试高频问题
 
 | 问题 | 答案要点 |
@@ -1436,6 +1592,7 @@ curl ... -H "Authorization: Bearer your-secret-key-here" ...
 | 错误信息怎么处理？ | `friendly_error` 映射，用异常类型判断 |
 | 检索不到内容怎么处理？ | 距离阈值降级（标定 0.96），返回"没找到"，不调 LLM |
 | 接口鉴权怎么做？ | Bearer token + `Depends` 依赖注入；`API_KEY` 从环境变量读 |
+| 限流怎么做？ | Redis 固定窗口 `incr + expire`，按 API Key，fail-open |
 | 为什么用 `Depends` 不用手动调？ | 鉴权逻辑抽出来，多接口共用，改一处生效 |
 | 开发期怎么快速迭代？ | volume 挂载代码/语料，`docker compose restart` 不用 rebuild |
 | RAG 评估用什么指标？ | 召回率 + 精确率 + MRR + 多样性 + 随机基线 |
@@ -1642,7 +1799,6 @@ def random_baseline(test_set, all_docs, k=3):
 | MCP Server 用了私有 API | `vectorstore.docstore._dict` 是内部 API，版本升级可能坏 | 构建索引时自己维护 chunks 列表并 pickle 落盘 |
 | **Reranker 性能** | CPU 单次 50~100 ms，249 条需 4~8 分钟 | 更小模型 / GPU / 缓存 |
 | **chunk 级评估** | 现在是文档级 | 标注 chunk id |
-| **限流未做** | Redis 依赖保留但没启用 | `incr + expire` |
 
 ### 改进方案
 
@@ -1664,11 +1820,11 @@ def random_baseline(test_set, all_docs, k=3):
 | 阈值标定 | 正负样本距离分布 + PR 曲线 | ✅ 已做（MAX_DISTANCE 1.0→0.96） |
 | Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ✅ 已做（召回率 +4.4%） |
 | API Key 鉴权 | Bearer token + Depends | ✅ 已做 |
+| Redis 限流 | 按 API Key，20/分钟，fail-open | ✅ 已做 |
 | **语料扩充** | 2 篇 → 98 篇 | ✅ 已做 |
 | **测试集自动生成** | 30 条 → 249 条 | ✅ 已做 |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
 | 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
-| 限流 | Redis incr + expire | ⏳ 待做 |
 
 ### 面试答题模板
 
@@ -1735,6 +1891,15 @@ services:
     networks:
       - agent-net
 
+  redis:
+    image: redis:7
+    container_name: agent-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - agent-net
+    restart: unless-stopped
+
   agent-api:
     build: .
     container_name: agent-api
@@ -1747,12 +1912,15 @@ services:
       - MYSQL_PORT=3306
       - MYSQL_USER=root
       - MYSQL_DATABASE=agent
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - HF_ENDPOINT=https://hf-mirror.com
       - HF_HOME=/root/.cache/huggingface
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
       - DATA_DIR=/app/data
       - API_KEY=${API_KEY:-dev-key-change-me}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-20}
     volumes:
       - ./hf_cache:/root/.cache/huggingface
       - ./data:/app/data
@@ -1764,6 +1932,7 @@ services:
       - ./faiss_index:/app/faiss_index
     depends_on:
       - mysql
+      - redis
     networks:
       - agent-net
     restart: unless-stopped
@@ -1813,13 +1982,15 @@ torch
 
 **2026-10-13**：加 API Key 鉴权 + 开发期 volume 挂载
 
+**2026-10-14**：加 Redis 限流（`incr + expire`，fail-open）
+
 ### 14.5 面试话术（Docker 部署）
 
-> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，3.36 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 0.96，P=0.990、R=1.000、F1=0.995。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，召回率从 52.6% 提到 57.0%。当前知识库 98 篇文档 / 583 chunk，评估集 249 条，随机基线 3.0%。另外接口加了 API Key 鉴权，用 FastAPI 的 `Depends` 做依赖注入，`API_KEY` 从环境变量读。开发期把代码和语料目录做成 volume 挂载，改代码只要 `docker compose restart`，不用 rebuild。docker compose up -d 一条命令就能起完整服务：MySQL + Agent API。"
+> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，3.36 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 0.96，P=0.990、R=1.000、F1=0.995。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，召回率从 52.6% 提到 57.0%。当前知识库 98 篇文档 / 583 chunk，评估集 249 条，随机基线 3.0%。接口加了 API Key 鉴权和 Redis 限流——鉴权防'谁能调'，限流防'调多少次'，限流用 `incr + expire` 固定窗口，fail-open。开发期把代码和语料目录做成 volume 挂载，改代码只要 `docker compose restart`，不用 rebuild。docker compose up -d 一条命令就能起完整服务：MySQL + Redis + Agent API。"
 
 ## 十五、项目新增数据（更新）
 
-### 部署相关（2026-10-08 ~ 2026-10-13）
+### 部署相关（2026-10-08 ~ 2026-10-14）
 
 - Docker 数据位置：`D:\Docker`（55.73 GB）
 - C 盘可用空间：10.20 GB → **65.25 GB**
@@ -1839,11 +2010,13 @@ torch
 - **测试集扩充：30 条 → 249 条，随机基线 84.1% → 3.0%**
 - **判别空间：15.9 个点 → 54.0 个点**
 - **API Key 鉴权**：Bearer token + `Depends` 依赖注入
+- **Redis 限流**：按 API Key，20 次/分钟，`incr + expire`，fail-open
 - **开发期 volume 挂载**：改代码不用 rebuild
 
 ### Git 仓库状态（最新）
 
 - 新增 commit：
+  - `59e67a3` feat: add API Key auth + dev volume mounts
   - `72e038c` docs: sync notes, docs corpus, faiss index after threshold recalibration
   - `a4a7757` feat: 阈值重标定 + notes/07 拆分后语料同步（98 篇 / 583 chunk，MAX_DISTANCE 0.96）
   - `2eb5ccb` feat: 扩测试集 30→249 条（覆盖 83 篇文档），拆分面试题为 25 文件，随机基线 84.1%→3.5%
@@ -1879,6 +2052,8 @@ torch
 - 混合检索 vs 相似度：+2.0%
 - 护栏参数：recursion_limit=10, max_tokens=2000
 - 鉴权：Bearer token（`/chat` 和 `/chat/stream`），`API_KEY` 从环境变量读
+- 限流：Redis 固定窗口（`incr + expire`），按 API Key 限流 20 次/分钟，fail-open
+- Redis 服务：`redis:7` 镜像，容器名 `agent-redis`，端口 6379
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（容器重建不丢）
 - 公共模块：`rag_core/search.py`
 - 开发期挂载：`rag_api`、`mcp_test`、`rag_core`、`docs`、`faiss_index`、`data`、`hf_cache`
@@ -1890,4 +2065,4 @@ torch
 
 ---
 
-**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通、评估可复现、阈值有实验支撑、Rerank 精排就位、API Key 鉴权、开发期 volume 挂载、语料 98 篇 / 583 chunk、测试集 249 条**，可进入面试冲刺阶段。
+**备注**：如果新对话需要，可以直接复制本笔记。当前项目已**完整跑通、评估可复现、阈值有实验支撑、Rerank 精排就位、API Key 鉴权、Redis 限流、开发期 volume 挂载、语料 98 篇 / 583 chunk、测试集 249 条**，可进入面试冲刺阶段。

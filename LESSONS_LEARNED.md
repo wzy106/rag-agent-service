@@ -2,7 +2,7 @@
 
 > 记录项目开发过程中遇到的问题、分析过程和解决方案。
 > 每个故事按"问题 → 分析 → 方案 → 收获"结构。
-> 最后更新：2026-10-13（新增故事 32：接口裸奔；故事 33：改代码每次 rebuild；MAX_DISTANCE 0.96；语料 98 篇 / 583 chunk；随机基线 3.0%）
+> 最后更新：2026-10-14（新增故事 34：限流从"预留"到"落地"；MAX_DISTANCE 0.96；语料 98 篇 / 583 chunk；随机基线 3.0%）
 
 ## 快速索引
 
@@ -36,6 +36,7 @@
 | **测试集太小判别力不足** | **故事 31** |
 | **接口裸奔** | **故事 32** |
 | **改代码每次 rebuild** | **故事 33** |
+| **限流未落地** | **故事 34** |
 
 ---
 
@@ -1081,7 +1082,7 @@ jieba>=0.42.0
 rank-bm25>=0.2.2
 ```
 
-（`redis` 暂时保留，预留做限流）
+（`redis` 现在正式用于限流，不再是"预留"）
 
 ### 为什么这个问题容易被忽略
 - 开发时，**你机器上碰巧有**这些包（之前手动装过）
@@ -2053,7 +2054,7 @@ from fastapi import FastAPI, HTTPException, Header, Depends
 
 API_KEY = os.getenv("API_KEY", "dev-key-change-me")
 
-async def verify_key(authorization: str = Header(default="")):
+async def verify_key(authorization: str = Header(default="")) -> str:
     if not authorization:
         raise HTTPException(401, detail="缺少 Authorization 头")
     if not authorization.startswith("Bearer "):
@@ -2061,17 +2062,18 @@ async def verify_key(authorization: str = Header(default="")):
     token = authorization[7:].strip()
     if token != API_KEY:
         raise HTTPException(403, detail="API Key 无效")
+    return token
 ```
 
 **② 接口挂上依赖**
 
 ```python
 @app.post("/chat")
-async def chat(payload: ChatRequest, _: None = Depends(verify_key)):
+async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
     ...
 ```
 
-请求进 `/chat` 前，FastAPI 先跑 `verify_key`。抛异常就拦截，正常返回才进业务。
+请求进 `/chat` 前，FastAPI 先跑 `verify_key`。抛异常就拦截，正常返回才进业务。返回的 `token` 供后续限流使用。
 
 **③ `docker-compose.yml` 注入**
 
@@ -2116,6 +2118,7 @@ curl ... -H "Authorization: Bearer your-secret-key-here" ...
 | `API_KEY` 环境变量 | 密码外置，代码里不出现真实密钥 |
 | `${API_KEY:-默认}` | compose 从宿主机读，注入容器 |
 | `/history` 保持公开 | 展示层不需要鉴权 |
+| `verify_key` 返回 token | 供后续限流用 |
 
 ### 收获
 **鉴权不是为了防真实攻击，是为了证明你有生产级意识。** 面试官看的是"你知道生产环境长什么样"，而不是"你的玩具项目有没有被入侵"。
@@ -2267,6 +2270,119 @@ docker compose up -d
 
 ---
 
+## 故事 34：限流从"预留"到"落地"（2026-10-14）
+
+### 问题
+Redis 依赖一直挂在 `requirements.txt` 里，但整个项目**没有任何地方用它**。故事 19 删掉了缓存，Redis 就成了纯"预留"。
+
+面试官问"你为什么留着 Redis 依赖"，只能答"将来做限流"。**将来是多久？**
+
+### 分析
+**"预留依赖"是工程债的软性版本**：
+- 不算 bug，但项目里躺着一个"从没用过的依赖"
+- 面试时讲"我预留做限流"听起来像是"想做但没做"
+- 真正落地了才能讲"我用 `incr + expire` 做限流"
+
+**为什么限流必须做**：
+- 接口已经加了鉴权（故事 32），但鉴权只防"谁能调"，不防"调多少次"
+- 生产环境必须两层：**谁 + 多少**
+- 没有限流 = 一个 Key 可以无限打，等于没有保护
+
+### 方案
+
+**① 固定窗口算法**
+
+```python
+def rate_limit(key: str):
+    r = _get_redis()
+    redis_key = f"rate:{key}"
+    current = r.incr(redis_key)
+    if current == 1:
+        r.expire(redis_key, 60)   # 第一次访问设置 60 秒过期
+    if current > RATE_LIMIT_PER_MINUTE:
+        raise HTTPException(429, detail="请求过于频繁")
+```
+
+**原理**：
+- `incr` 原子自增，返回当前值
+- 第一次（返回 1）时设过期时间，60 秒窗口
+- 超过配额 → 429
+
+**② 按 API Key 限流**
+
+复用鉴权拿到的 token：
+
+```python
+async def verify_key(authorization: str = Header(default="")) -> str:
+    ...
+    return token
+
+@app.post("/chat")
+async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
+    rate_limit(token)
+    ...
+```
+
+**③ fail-open**
+
+```python
+try:
+    ...  # Redis 操作
+except HTTPException:
+    raise   # 限流本身触发，要抛出
+except redis.RedisError as e:
+    print(f"[限流] Redis 不可用，放行：{e}")
+    # 不抛异常，继续执行主流程
+```
+
+**Redis 挂了放行，不是拒绝。** 限流是保护措施，不能让它成为新的单点故障。
+
+### 验证
+
+```cmd
+for /L %i in (1,1,21) do @curl.exe ... -w "%i : %{http_code}\n" ...
+```
+
+输出：
+
+```text
+1 : 200
+...
+20 : 200
+21 : 429
+```
+
+Redis 里：
+
+```cmd
+docker exec -it agent-redis redis-cli get "rate:wzyyqw106"
+:: "21"
+docker exec -it agent-redis redis-cli ttl "rate:wzyyqw106"
+:: 47（剩余秒数）
+```
+
+### 关键设计
+
+| 点 | 说明 |
+|---|---|
+| 维度 | 按 API Key，复用鉴权拿到的 token |
+| 算法 | 固定窗口（incr + expire），不做滑动窗口 |
+| fail-open | Redis 挂了放行，不能挂掉主流程 |
+| 配额可配 | 环境变量 `RATE_LIMIT_PER_MINUTE` |
+| `/history` 不限流 | 展示层流量小 |
+
+### 收获
+**"预留"变"落地"只需要 30 行代码。** 但差的是"我打算做"和"我做了"——面试里是两个量级的回答。
+
+**fail-open 是生产级设计。** 加一个依赖前先想清楚：它挂了怎么办？限流、监控、日志这些"辅助功能"，挂了要放行，不能变成新的故障点。
+
+**固定窗口够用就别做滑动窗口。** 项目规模小，20 次/分钟的精度要求不高。滑动窗口是"更精确但也更复杂"，不是"更好"。
+
+**面试时能讲**：
+> "我把 Redis 从'预留'变成'落地'——按 API Key 限流，20 次/分钟。用 `incr + expire` 做固定窗口，比滑动窗口简单，够用。关键设计是 **fail-open**：Redis 挂了就放行，限流是保护措施，不能让它成为新的单点故障。鉴权 + 限流是生产环境的两层保护：鉴权防'谁能调'，限流防'调多少次'。"
+
+---
+
 ## 总结
 
 这些坑覆盖了 Agent 开发中常见的几类问题：
@@ -2281,7 +2397,7 @@ docker compose up -d
 | 构建优化 | Dockerfile 指令顺序影响缓存效率；多阶段构建瘦身；开发期用挂载 |
 | 协议理解 | stdio 通信要用 stderr 打日志 |
 | 检索算法 | 混合检索要调权重，MMR 是 chunk 级多样性 |
-| 生产级意识 | Agent 要有护栏，记忆要持久化，接口要鉴权 |
+| 生产级意识 | Agent 要有护栏，记忆要持久化，接口要鉴权，限流要落地 |
 | 功能演进回归 | 加新功能要检查旧设计的假设是否还成立 |
 | 幻觉治理 | Prompt 软约束 + 检索层硬降级，两层防护 |
 | 评估方法 | 单一指标会误导，要多个指标一起看 |
@@ -2301,5 +2417,6 @@ docker compose up -d
 | **测试集太小判别力不足** | **30 条样本 + 2 篇文档 → 随机基线 84.1%，判别空间 15.9 个点；扩到 249 条 + 98 篇 / 583 chunk → 随机基线 3.0%，判别空间 54.0 个点** |
 | **接口裸奔** | **生产环境必须有鉴权；用 FastAPI 的 Depends 做依赖注入，鉴权逻辑和业务解耦** |
 | **改代码每次 rebuild** | **开发期 volume 挂载，生产期 COPY 冻结；频繁变动的文件不该打进镜像** |
+| **限流未落地** | **"预留"变"落地"只需 30 行；限流用 incr+expire 固定窗口；fail-open 避免引入新单点** |
 
 **每个问题的解决过程都体现了同一个原则：先分析根本原因，再选择方案，最后量化效果。**

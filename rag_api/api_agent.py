@@ -3,6 +3,7 @@ import json
 import time
 import asyncio
 import pymysql
+import redis
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -26,8 +27,8 @@ MAX_TOKENS = 2000
 # ===== API Key 鉴权 =====
 API_KEY = os.getenv("API_KEY", "dev-key-change-me")
 
-async def verify_key(authorization: str = Header(default="")):
-    """校验 Bearer token。"""
+async def verify_key(authorization: str = Header(default="")) -> str:
+    """校验 Bearer token，返回 token 供限流使用。"""
     if not authorization:
         raise HTTPException(status_code=401, detail="缺少 Authorization 头")
     if not authorization.startswith("Bearer "):
@@ -35,6 +36,47 @@ async def verify_key(authorization: str = Header(default="")):
     token = authorization[7:].strip()
     if token != API_KEY:
         raise HTTPException(status_code=403, detail="API Key 无效")
+    return token
+
+# ===== Redis 限流 =====
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
+
+_redis_client = None
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+    return _redis_client
+
+def rate_limit(key: str):
+    """固定窗口限流：每分钟最多 RATE_LIMIT_PER_MINUTE 次。
+
+    Redis 不可用时放行（fail-open）——限流是保护措施，不能让它挂掉主流程。
+    """
+    try:
+        r = _get_redis()
+        redis_key = f"rate:{key}"
+        current = r.incr(redis_key)
+        if current == 1:
+            r.expire(redis_key, 60)
+        if current > RATE_LIMIT_PER_MINUTE:
+            raise HTTPException(
+                status_code=429,
+                detail=f"请求过于频繁，每分钟最多 {RATE_LIMIT_PER_MINUTE} 次，请稍后再试",
+            )
+    except HTTPException:
+        # 限流本身触发，正常抛出
+        raise
+    except redis.RedisError as e:
+        # Redis 挂了：放行，只打日志
+        print(f"[限流] Redis 不可用，放行：{type(e).__name__}: {e}")
 
 # ===== 友好错误提示 =====
 def friendly_error(e: Exception) -> str:
@@ -166,7 +208,8 @@ def root():
     return {"message": "Agent API is running"}
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(payload: ChatRequest, _: None = Depends(verify_key)):
+async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
+    rate_limit(token)
     thread_id = payload.thread_id
 
     config = {
@@ -230,7 +273,8 @@ class StreamRequest(BaseModel):
     thread_id: str = "user_001"
 
 @app.post("/chat/stream")
-async def chat_stream(payload: StreamRequest, _: None = Depends(verify_key)):
+async def chat_stream(payload: StreamRequest, token: str = Depends(verify_key)):
+    rate_limit(token)
     start_time = time.time()
     thread_id = payload.thread_id
     print(f"[请求] 收到消息：{payload.message}（thread_id={thread_id}）")

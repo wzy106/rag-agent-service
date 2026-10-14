@@ -1,6 +1,6 @@
 # RAG Agent 服务
 
-基于 LangChain + LangGraph + MCP + RAG 的企业级 Agent 服务，支持 SSE 流式输出，持久化记忆，API Key 鉴权，Docker 容器化部署。
+基于 LangChain + LangGraph + MCP + RAG 的企业级 Agent 服务，支持 SSE 流式输出，持久化记忆，API Key 鉴权，Redis 限流，Docker 容器化部署。
 
 ## 架构
 
@@ -9,6 +9,7 @@
     ↓ HTTP POST /chat/stream  （带 Bearer token）
 FastAPI（api_agent.py）
     ↓ verify_key 鉴权通过
+    ↓ rate_limit 限流检查
     ↓ agent.astream()
 LangChain Agent（ReAct 循环）
     ↓ 工具调用
@@ -28,27 +29,32 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
     ↓ SSE 流式返回
 客户端
 
+鉴权层：
+- API Key 通过 Bearer token 传入
+- Header + Depends 做依赖注入，鉴权逻辑和业务逻辑解耦
+- API_KEY 从环境变量读，不写死在代码里
+
+限流层：
+- Redis 固定窗口限流（incr + expire）
+- 按 API Key 限流，默认 20 次/分钟
+- Redis 不可用时放行（fail-open），限流不能成为新的单点故障
+
 记忆层：
 - LangGraph checkpointer（唯一真相源）
 - AsyncSqliteSaver 持久化到 SQLite 文件（重启不丢）
 - checkpoints.db 挂载到宿主机 ./data/，容器重建也不丢
 - MySQL 只做展示层（给 /history 接口用）
 
-鉴权层：
-- API Key 通过 Bearer token 传入
-- Header + Depends 做依赖注入，鉴权逻辑和业务逻辑解耦
-- API_KEY 从环境变量读，不写死在代码里
-
 缓存层：
-- 暂时没有缓存。历史版本用过 Redis，key 格式 chat:{thread_id}:v{context_version}:{md5}，
+- 暂时没有缓存。历史版本用过 Redis 缓存，key 格式 chat:{thread_id}:v{context_version}:{md5}，
   但实测发现 context_version 每轮 +2，命中率结构性为 0，属于负优化，已删除。
-- Redis 依赖保留在 requirements.txt 中，预留做限流（incr + expire）。
 ```
 
 ## 核心功能
 
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，服务重启/容器重建不丢历史
 - **API Key 鉴权**：`/chat` 和 `/chat/stream` 需要 Bearer token；`/history` 和 `/` 保持公开
+- **Redis 限流**：按 API Key 限流，20 次/分钟（`incr + expire` 固定窗口，fail-open）
 - **RAG 检索增强**：本地 embedding（BAAI/bge-small-zh-v1.5）+ FAISS 持久化
 - **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
 - **混合检索**：向量 + BM25 + 加权 RRF（向量 0.7 / BM25 0.3）
@@ -90,7 +96,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 ### 本地开发
 
 ```bash
-# 1. 启动 MySQL（Redis 可选）
+# 1. 启动 MySQL + Redis
 docker compose -f docker-compose.db.yml up -d
 
 # 2. 启动 API 服务
@@ -147,12 +153,12 @@ docker compose restart agent-api
 
 ## 接口
 
-| 方法 | 路径 | 鉴权 | 说明 |
-|---|---|---|---|
-| GET | `/` | 否 | 健康检查 |
-| POST | `/chat` | ✅ 需要 Bearer token | 普通对话 |
-| POST | `/chat/stream` | ✅ 需要 Bearer token | 流式对话（SSE） |
-| GET | `/history` | 否 | 查看对话历史（MySQL 展示层） |
+| 方法 | 路径 | 鉴权 | 限流 | 说明 |
+|---|---|---|---|---|
+| GET | `/` | 否 | 否 | 健康检查 |
+| POST | `/chat` | ✅ Bearer token | 20/分钟 | 普通对话 |
+| POST | `/chat/stream` | ✅ Bearer token | 20/分钟 | 流式对话（SSE） |
+| GET | `/history` | 否 | 否 | 查看对话历史（MySQL 展示层） |
 
 ### 鉴权格式
 
@@ -166,6 +172,16 @@ Authorization: Bearer <API_KEY>
 - 格式不对 → 401 `{"detail": "Authorization 格式错误..."}`
 - token 不对 → 403 `{"detail": "API Key 无效"}`
 - token 正确 → 正常返回
+
+### 限流格式
+
+按 API Key 限流，默认 20 次/分钟。超限返回：
+
+```json
+{"detail": "请求过于频繁，每分钟最多 20 次，请稍后再试"}
+```
+
+限流配额通过环境变量 `RATE_LIMIT_PER_MINUTE` 配置。**Redis 不可用时放行**（fail-open），限流不会成为新的单点故障。
 
 ### 请求示例
 
@@ -214,6 +230,7 @@ DEEPSEEK_API_KEY=sk-xxx
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 MYSQL_PASSWORD=your_mysql_password
 API_KEY=your-secret-key-here
+RATE_LIMIT_PER_MINUTE=20
 ```
 
 | 变量 | 默认值 | 说明 |
@@ -222,18 +239,22 @@ API_KEY=your-secret-key-here
 | `DEEPSEEK_BASE_URL` | — | DeepSeek API 地址 |
 | `MYSQL_PASSWORD` | `root123` | MySQL 密码 |
 | `API_KEY` | `dev-key-change-me` | 接口鉴权用的 Bearer token |
+| `RATE_LIMIT_PER_MINUTE` | `20` | 每分钟限流配额（按 API Key 计） |
 
 **Docker 容器额外环境变量**（由 docker-compose.yml 注入）：
 
 | 变量 | 值 | 说明 |
 |---|---|---|
 | `MYSQL_HOST` | `mysql` | 容器内用服务名，不用 localhost |
+| `REDIS_HOST` | `redis` | 容器内用服务名，本地开发用 `localhost` |
+| `REDIS_PORT` | `6379` | Redis 端口 |
 | `HF_HOME` | `/root/.cache/huggingface` | 模型缓存目录 |
 | `HF_ENDPOINT` | `https://hf-mirror.com` | 国内镜像 |
 | `HF_HUB_OFFLINE` | `1` | 离线模式 |
 | `TRANSFORMERS_OFFLINE` | `1` | 离线模式 |
 | `DATA_DIR` | `/app/data` | checkpoints 持久化目录 |
 | `API_KEY` | `${API_KEY:-dev-key-change-me}` | 从宿主机 `.env` 读，读不到用默认值 |
+| `RATE_LIMIT_PER_MINUTE` | `${RATE_LIMIT_PER_MINUTE:-20}` | 从宿主机 `.env` 读，读不到用默认值 |
 
 ## RAG 评估
 
@@ -297,6 +318,7 @@ API_KEY=your-secret-key-here
 - **Rerank**：bge-reranker-base（CrossEncoder）
 - **检索**：sentence-transformers + FAISS + BM25 + 加权 RRF
 - **鉴权**：Bearer token + FastAPI Depends
+- **限流**：Redis 固定窗口（`incr + expire`）
 - **降级**：向量距离阈值（标定 0.96）
 - **记忆持久化**：AsyncSqliteSaver
 - **展示层**：MySQL
@@ -317,6 +339,7 @@ API_KEY=your-secret-key-here
 | 抽公共 `hybrid_search` 到 `rag_core/` | 服务端和评估脚本共用一份代码 |
 | `MAX_DISTANCE` 标定为 0.96 | 通过距离分布 + PR 曲线找 F1 最大点 |
 | **API Key 鉴权** | **用 Depends 依赖注入，鉴权逻辑和业务逻辑解耦** |
+| **Redis 限流** | **按 API Key 限流，`incr + expire` 固定窗口，fail-open** |
 | **开发期 volume 挂载** | **改代码不用 rebuild，迭代秒级** |
 | Docker 多阶段构建 | 镜像从 3.51 GB 降到 2.42 GB |
 | CPU 版 torch | 下载量从 5 GB 降到 600 MB |
@@ -329,8 +352,7 @@ API_KEY=your-secret-key-here
 - 语料里混着"面试题标准答案"，**存在语料同源问题**
 - 流式状态机用布尔变量表达，边界情况可能出错
 - **Rerank 单次推理 50~100 ms（CPU）**，249 条查询需 4~8 分钟；高并发场景需要优化
-- 限流还没做（Redis 依赖保留，计划 `incr + expire`）
 
 ## 学习路径
 
-ReAct → LangChain → LangGraph → RAG → MCP → FastAPI → Docker → 鉴权 → 开发期 volume 挂载
+ReAct → LangChain → LangGraph → RAG → MCP → FastAPI → Docker → 鉴权 → 限流 → 开发期 volume 挂载
