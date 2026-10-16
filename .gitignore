@@ -10,6 +10,9 @@ __pycache__/
 # 环境变量（含密钥）
 .env
 
+# 个人面试自测材料（不公开）
+INTERVIEW_DRILL.md
+
 # 虚拟环境
 .venv/
 .venv-test/
