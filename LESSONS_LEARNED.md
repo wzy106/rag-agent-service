@@ -2,7 +2,7 @@
 
 > 记录项目开发过程中遇到的问题、分析过程和解决方案。
 > 每个故事按"问题 → 分析 → 方案 → 收获"结构。
-> 最后更新：2026-10-14（新增故事 34：限流从"预留"到"落地"；MAX_DISTANCE 0.96；语料 98 篇 / 583 chunk；随机基线 3.0%）
+> 最后更新：2026-10-16（订正性能数字：MCP 改常驻 session、Rerank 实测约 2~7 秒；修复 `/history` 越权 + 多租户隔离；新增故事 35：测试与 CI）
 
 ## 快速索引
 
@@ -37,6 +37,7 @@
 | **接口裸奔** | **故事 32** |
 | **改代码每次 rebuild** | **故事 33** |
 | **限流未落地** | **故事 34** |
+| **测试与 CI** | **故事 35** |
 
 ---
 
@@ -149,9 +150,10 @@ RuntimeError: asyncio.run() cannot be called from a running event loop
 async def lifespan(app: FastAPI):
     global agent
     client = MultiServerMCPClient({...})
-    tools = await client.get_tools()
-    agent = create_agent(model, tools=tools)
-    yield
+    async with client.session("rag") as session:      # 常驻 session
+        tools = await load_mcp_tools(session)
+        agent = create_agent(model, tools=tools)
+        yield
     print("[关闭] 服务停止")
 
 app = FastAPI(lifespan=lifespan)
@@ -164,6 +166,8 @@ app = FastAPI(lifespan=lifespan)
 
 ### 收获
 异步框架下，初始化逻辑应该放在生命周期钩子里，而不是模块顶层。
+
+> **后续订正（2026-10-16）**：上面的示例用了 `client.get_tools()`——后来发现它**每次工具调用都会新建 session**，等于每次调用都重新拉起 MCP 子进程并重载全部模型，实测**每次工具调用 35~44 秒**。已改为**常驻 session**（`async with client.session("rag") as session:` + `load_mcp_tools(session)`），子进程整个服务生命周期只 spawn 一次。
 
 ---
 
@@ -1044,7 +1048,7 @@ ModuleNotFoundError: No module named 'redis'
 ### 杀伤力
 - 面试官 clone 下来，`pip install -r requirements.txt` 装到一半就报错
 - Docker 构建时，容器里缺 `redis`，`uvicorn` 一 import 就崩
-- CI 流水线同理
+- CI 流水线同理（**2026-10-16 补充**：CI 已落地，`pip install -r requirements-dev.txt` 会把这类缺失暴露在 push 阶段）
 
 **这是"项目能不能在别人机器上跑"的最底线问题。**
 
@@ -1809,7 +1813,8 @@ def evaluate_threshold(thr):
 ### 方案（短期）
 - 加了 Reranker，精确率 0.86 → 0.90
 - 用 `recall_k=20, final_k=3` 的两阶段 pipeline
-- 懒加载设计（第一次调用才加载 3.36 GB 模型，不拖慢服务启动）
+- 懒加载设计（第一次调用才加载 约 1.1 GB 模型，不拖慢服务启动）
+- **性能代价（2026-10-16 实测）**：CPU 上精排 20 候选约 **2~7 秒/次**（负载高时可达 13 秒），是整条检索链路里最慢的一环。这里早先写过"单次 50~100 ms"，但**从未实测**，差了 1~2 个数量级——面试如果被追问"怎么测的"会露馅。
 
 ### 方案（长期，已完成）
 **扩语料到 98 篇 / 583 chunk**，测试集扩到 249 条。新结果：
@@ -2380,6 +2385,38 @@ docker exec -it agent-redis redis-cli ttl "rate:wzyyqw106"
 
 **面试时能讲**：
 > "我把 Redis 从'预留'变成'落地'——按 API Key 限流，20 次/分钟。用 `incr + expire` 做固定窗口，比滑动窗口简单，够用。关键设计是 **fail-open**：Redis 挂了就放行，限流是保护措施，不能让它成为新的单点故障。鉴权 + 限流是生产环境的两层保护：鉴权防'谁能调'，限流防'调多少次'。"
+
+---
+
+## 故事 35：从"能跑"到"有测试和 CI"（2026-10-16）
+
+### 问题
+功能全跑通了，但**一个自动化测试都没有**——所有验证都是手工的：起服务、curl、肉眼看输出。后果是：
+- 改一行代码，不知道会不会碰坏别的地方
+- 复现 bug 靠记忆，不靠脚本
+
+### 分析
+动手写测试时先撞上一个结构性问题：**`eval/` 和 `scripts/` 根本没法被 pytest 导入**——它们在 import 时就执行（加载模型、跑评估）。这不是"测试写得不好"，是**代码不可测**，属于设计问题。
+
+另一个现实约束：检索测试要加载 bge 模型（几百 MB），不可能每次 push 都跑。
+
+### 方案
+1. **分两层**：单元测试（打桩、秒级）+ 集成测试（需模型，`@pytest.mark.integration` 标记）
+2. **接口测试打桩**：假 Agent / 假 MySQL / 假 Redis，只断言"有没有按租户拼 thread_id""SQL 有没有带 owner 条件"，不依赖真实 LLM/DB
+3. **降级测试用机制而非数据**：把 `max_distance` 调到 `-1.0` 确定性触发降级分支，而不是赌某条查询的距离刚好超阈值
+4. **CI 只跑单元测试**：`.github/workflows/ci.yml`，push / PR 触发
+
+结果：23 个用例，单元 2 秒、集成 23 秒。
+
+### 收获
+**可测试性是设计出来的。** 脚本要写成 `def main()` + `if __name__ == "__main__": main()`，才能被 import、被测试——不然它只是"能跑一次的脚本"。
+
+**测试替身分清 Stub / Mock / Fake。** 这里用 **Fake**（有真实逻辑的替身，比如 `_FakeRedis` 真的会计数），比 Mock（只断言调用）更贴近真实行为。
+
+**CI 是"作品"和"工程"的分界线。** 它的价值不是"跑测试"，而是**让回归在合并前暴露**——不靠人记得跑。
+
+### 面试时能讲
+> "项目一开始零自动化测试。加测试时发现 `eval/` 和 `scripts/` 在 import 时就执行、根本没法被测，这是可测试性的设计问题。我按测试金字塔分两层：单元测试打桩（假 Agent / 假 MySQL / 假 Redis），断言租户隔离和 SQL 条件；集成测试标记 `integration`，因为要下模型所以 CI 跳过。还踩了个坑：测'降级'不能靠一条查询赌它距离超阈值，要把阈值调到不可能满足来确定性触发分支。最后加了 GitHub Actions，push 就自动跑单元测试。"
 
 ---
 

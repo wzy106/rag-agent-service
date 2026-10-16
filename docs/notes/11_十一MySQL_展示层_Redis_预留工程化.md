@@ -17,10 +17,12 @@
 ```sql
 CREATE TABLE conversations (
     id INT PRIMARY KEY AUTO_INCREMENT,
-    thread_id VARCHAR(64),
+    owner VARCHAR(32) NOT NULL,            -- 租户 id（API key 派生），用于隔离
+    thread_id VARCHAR(64) NOT NULL,
     role VARCHAR(20),
     content TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_owner_thread (owner, thread_id)
 );
 ```
 
@@ -36,6 +38,7 @@ CREATE TABLE conversations (
 **关键设计**：
 - MySQL 写入包 try/except，失败只打日志
 - `/history` 接口加 `limit` 上限保护（最大 100）
+- `/history` **需要鉴权**，且查询带 `owner = 当前租户` 条件——只返回自己租户的记录（防越权 IDOR）
 
 ### Redis 预留说明
 

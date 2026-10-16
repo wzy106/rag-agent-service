@@ -14,7 +14,7 @@ for md_file in docs_dir.rglob("*.md"):
 
 - 加载 `docs/` 下**所有子目录**的 Markdown 文件（用 `rglob` 递归）
 - **`source` 用相对路径**（如 `notes_interview/q01_xxx.md`），避免不同子目录同名文件冲突
-- 当前知识库：98 篇 markdown，切成 576 块
+- 当前知识库：98 篇 markdown，切成 583 块
 
 ### 2. 文档切分
 
@@ -64,7 +64,7 @@ else:
 
 - 首次启动：构建索引并保存到磁盘（`index.faiss` + `index.pkl`）
 - 后续启动：直接从磁盘加载，避免重复 embedding
-- 索引文件提交进 Git（576 chunk 约 1~2 MB）
+- 索引文件提交进 Git（583 chunk 约 1~2 MB）
 
 ### 5. 检索策略
 
@@ -164,7 +164,7 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 | 类型 | 代表模型 | 输入 | 速度 | 精度 |
 |---|---|---|---|---|
 | 双塔（Embedding） | bge-small-zh-v1.5 | 单条文本 | 快（毫秒级） | 粗 |
-| 交叉编码器（Rerank） | bge-reranker-base | **(query, doc) 对** | 慢（百毫秒级） | 精 |
+| 交叉编码器（Rerank） | bge-reranker-base | **(query, doc) 对** | 慢（CPU 上秒级） | 精 |
 
 **实现**：
 
@@ -205,9 +205,11 @@ def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
 - 召回率 **+6.0%**，MRR **+0.04**
 - **Rerank 提升的主要是召回率**——混合检索直接返回 Top-3 会漏掉“相关但排名 4~20”的 chunk，Rerank 拿 Top-20 重新排，有机会把关键 chunk 顶上来
 
-**懒加载设计**：Reranker 模型 3.36 GB，加载要 10~20 秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**。
+**懒加载设计**：Reranker 模型约 1.1 GB（278M 参数），加载要数秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**（服务启动时另有预热把加载成本前移）。
 
-**性能问题**：249 条查询 × 20 候选 = 4980 次推理，CPU 上单次 50~100 ms，总耗时 **4~8 分钟**。高并发场景需要优化（更小模型 / GPU / 缓存）。
+**性能问题**：Rerank 要逐对推理。249 条查询 × 20 候选 = 4980 次推理，CPU 上精排 20 候选约 2~7 秒（本机实测），249 条跑完约 10~30 分钟。高并发场景需要优化（更小模型 / GPU / ONNX 量化）。
+
+> **踩坑订正**：文档早先写的"单次 50~100 ms"**从未实测**，且与"249 条 4~8 分钟"（≈1~2 s/query）自相矛盾。
 
 #### 5.5 降级策略（避免幻觉）
 

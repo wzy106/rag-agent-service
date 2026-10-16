@@ -19,7 +19,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
                             ↓
                     降级判断（距离阈值 0.96）
                             ↓ 通过
-                    混合检索召回 Top-20（向量 + BM25 + 加权 RRF）
+                    混合检索召回 Top-N（向量 + BM25 + 加权 RRF，默认 N=20 可配）
                             ↓
                     Rerank 精排 Top-3（bge-reranker-base, CrossEncoder）
                             ↓
@@ -32,7 +32,8 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 鉴权层：
 - API Key 通过 Bearer token 传入
 - Header + Depends 做依赖注入，鉴权逻辑和业务逻辑解耦
-- API_KEY 从环境变量读，不写死在代码里
+- API_KEY / API_KEYS 从环境变量读，不写死在代码里
+- 认证 ≠ 授权：`verify_key` 只负责认证并返回租户 id（principal），具体能读到哪些数据由各接口按 principal 过滤
 
 限流层：
 - Redis 固定窗口限流（incr + expire）
@@ -53,17 +54,18 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 ## 核心功能
 
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，服务重启/容器重建不丢历史
-- **API Key 鉴权**：`/chat` 和 `/chat/stream` 需要 Bearer token；`/history` 和 `/` 保持公开
+- **API Key 鉴权**：`/chat`、`/chat/stream`、`/history` 都需要 Bearer token（仅 `/` 健康检查公开）；支持多 key，每个 key 一个租户，会话与历史互相隔离
 - **Redis 限流**：按 API Key 限流，20 次/分钟（`incr + expire` 固定窗口，fail-open）
 - **RAG 检索增强**：本地 embedding（BAAI/bge-small-zh-v1.5）+ FAISS 持久化
-- **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
+- **两阶段检索**：混合检索召回 Top-N（`RAG_RECALL_K`，默认 20）→ Rerank 精排 Top-3
 - **混合检索**：向量 + BM25 + 加权 RRF（向量 0.7 / BM25 0.3）
 - **Rerank 精排**：bge-reranker-base（CrossEncoder），召回率 +4.4%，MRR +0.05
 - **公共检索模块**：`rag_core/search.py`，服务端和评估脚本共用同一份 `hybrid_search`
 - **降级策略**：向量距离阈值（标定为 0.96），检索不到就不调 LLM，避免幻觉
-- **MCP 工具解耦**：工具独立成 Server，跨进程 stdio 通信
+- **MCP 工具解耦**：工具独立成 Server，跨进程 stdio 通信；**常驻 session**（`client.session()` + `load_mcp_tools`，子进程只拉起一次，模型不重复加载）
+- **检索可配置**：候选数 `RAG_RECALL_K`（默认 20）、精排截断 `RAG_RERANK_MAX_LENGTH`、精排开关 `RAG_ENABLE_RERANK`
 - **SSE 流式输出**：逐 token 返回，中间步骤过滤
-- **MySQL 展示层**：对话历史按 thread_id 持久化，供 `/history` 接口查询
+- **MySQL 展示层**：对话历史按「租户 + thread_id」持久化，`/history` 只能查到自己租户的记录
 - **Agent 护栏**：`recursion_limit=10` + `max_tokens=2000`，防止死循环和 Token 爆炸
 - **友好错误处理**：异常映射为可读提示，不泄漏 API key、路径等内部信息
 - **RAG 评估**：249 条测试项，5 种策略对比 + 随机基线（3.0%），一条命令可复现
@@ -87,6 +89,8 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 | `eval/` | RAG 评估脚本 + 测试集（249 条）+ 阈值标定 |
 | `eval/output/` | 标定产生的图（距离分布 + PR 曲线） |
 | `scripts/` | 工具脚本（拆分笔记、生成测试集） |
+| `tests/` | pytest 测试（单元 + 集成） |
+| `.github/workflows/` | GitHub Actions CI |
 | `faiss_index/` | FAISS 索引（583 chunk，已提交进 Git） |
 | `hf_cache/` | HuggingFace 模型缓存（embedding + reranker，volume 挂载） |
 | `data/` | checkpoints.db 持久化目录（volume 挂载，不提交） |
@@ -156,9 +160,9 @@ docker compose restart agent-api
 | 方法 | 路径 | 鉴权 | 限流 | 说明 |
 |---|---|---|---|---|
 | GET | `/` | 否 | 否 | 健康检查 |
-| POST | `/chat` | ✅ Bearer token | 20/分钟 | 普通对话 |
+| POST | `/chat` | ✅ Bearer token | 20/分钟 | 普通对话（thread_id 必填） |
 | POST | `/chat/stream` | ✅ Bearer token | 20/分钟 | 流式对话（SSE） |
-| GET | `/history` | 否 | 否 | 查看对话历史（MySQL 展示层） |
+| GET | `/history` | ✅ Bearer token | 否 | 查看对话历史（只返回**自己租户**的记录） |
 
 ### 鉴权格式
 
@@ -173,9 +177,17 @@ Authorization: Bearer <API_KEY>
 - token 不对 → 403 `{"detail": "API Key 无效"}`
 - token 正确 → 正常返回
 
+**多租户**：`API_KEYS` 支持逗号分隔的多个 key，**每个 key 是一个独立租户**：
+
+- 鉴权通过后返回的是该 key 对应的租户 id（`sha256(key)[:16]`），**不是 key 本身**
+- 记忆（LangGraph checkpointer）按 `"{租户}:{thread_id}"` 命名空间隔离——同一个 `thread_id` 在不同 key 下互不影响
+- 对话历史（MySQL）带 `owner` 列，`/history` 只返回 `owner = 当前租户` 的记录
+
+> 只有单个 `API_KEY` 时，所有持有者同属一个租户——真隔离需要一 key 一人。
+
 ### 限流格式
 
-按 API Key 限流，默认 20 次/分钟。超限返回：
+按租户（API Key）限流，默认 20 次/分钟。超限返回：
 
 ```json
 {"detail": "请求过于频繁，每分钟最多 20 次，请稍后再试"}
@@ -198,8 +210,9 @@ curl -X POST http://127.0.0.1:8000/chat/stream \
   -H "Authorization: Bearer your-secret-key-here" \
   -d '{"message": "MCP 是什么？", "thread_id": "user_001"}'
 
-# 查看历史（不需要鉴权）
-curl "http://127.0.0.1:8000/history?thread_id=user_001"
+# 查看历史（需要鉴权；只返回自己租户的该 thread_id 的记录）
+curl "http://127.0.0.1:8000/history?thread_id=user_001" \
+  -H "Authorization: Bearer your-secret-key-here"
 ```
 
 ### 多轮对话演示
@@ -238,8 +251,12 @@ RATE_LIMIT_PER_MINUTE=20
 | `DEEPSEEK_API_KEY` | — | DeepSeek API 密钥 |
 | `DEEPSEEK_BASE_URL` | — | DeepSeek API 地址 |
 | `MYSQL_PASSWORD` | `root123` | MySQL 密码 |
-| `API_KEY` | `dev-key-change-me` | 接口鉴权用的 Bearer token |
-| `RATE_LIMIT_PER_MINUTE` | `20` | 每分钟限流配额（按 API Key 计） |
+| `API_KEY` | `dev-key-change-me` | 接口鉴权用的 Bearer token（单租户） |
+| `API_KEYS` | — | 逗号分隔的多个 key，每个 key 一个独立租户；设置后优先于 `API_KEY` |
+| `RATE_LIMIT_PER_MINUTE` | `20` | 每分钟限流配额（按租户计） |
+| `RAG_RECALL_K` | `20` | 混合检索粗排召回候选数（越大越准越慢） |
+| `RAG_RERANK_MAX_LENGTH` | `512` | Reranker 输入截断长度（token） |
+| `RAG_ENABLE_RERANK` | `1` | 置 `0` 关闭精排，直接返回粗排 Top-3 |
 
 **Docker 容器额外环境变量**（由 docker-compose.yml 注入）：
 
@@ -254,7 +271,27 @@ RATE_LIMIT_PER_MINUTE=20
 | `TRANSFORMERS_OFFLINE` | `1` | 离线模式 |
 | `DATA_DIR` | `/app/data` | checkpoints 持久化目录 |
 | `API_KEY` | `${API_KEY:-dev-key-change-me}` | 从宿主机 `.env` 读，读不到用默认值 |
+| `API_KEYS` | `${API_KEYS:-}` | 多租户 key 列表，从宿主机 `.env` 读 |
 | `RATE_LIMIT_PER_MINUTE` | `${RATE_LIMIT_PER_MINUTE:-20}` | 从宿主机 `.env` 读，读不到用默认值 |
+
+## 测试
+
+```bash
+pip install -r requirements-dev.txt
+
+pytest -m "not integration"   # 单元测试：快，不需要模型
+pytest -m integration         # 集成测试：需要本地 HF 模型 + FAISS 索引
+pytest                        # 全部
+```
+
+| 层级 | 覆盖内容 | 需要模型 |
+|---|---|---|
+| 单元（`test_auth.py` / `test_api_units.py`） | 鉴权、租户隔离、`/history` 越权、`thread_id` 校验、错误映射、限流（含 fail-open） | 否 |
+| 集成（`test_search_integration.py`） | 索引加载、`hybrid_search` 返回数、距离阈值降级、精排开关 | 是 |
+
+- 接口测试用**打桩**（假 Agent / 假 MySQL / 假 Redis），不依赖真实 LLM 或数据库
+- **CI**：`.github/workflows/ci.yml`，push / PR 时跑单元测试（集成测试需下载模型，CI 跳过）
+- 测试用的 API key 固定为 `key_alice` / `key_bob`，不读真实 `.env`
 
 ## RAG 评估
 
@@ -317,8 +354,9 @@ RATE_LIMIT_PER_MINUTE=20
 - **Embedding**：bge-small-zh-v1.5（512 维，双塔）
 - **Rerank**：bge-reranker-base（CrossEncoder）
 - **检索**：sentence-transformers + FAISS + BM25 + 加权 RRF
-- **鉴权**：Bearer token + FastAPI Depends
+- **鉴权**：Bearer token + FastAPI Depends（多 key 多租户隔离）
 - **限流**：Redis 固定窗口（`incr + expire`）
+- **测试**：pytest（单元 + 集成）+ GitHub Actions CI
 - **降级**：向量距离阈值（标定 0.96）
 - **记忆持久化**：AsyncSqliteSaver
 - **展示层**：MySQL
@@ -351,7 +389,9 @@ RATE_LIMIT_PER_MINUTE=20
 - 评估是**文档级召回**而非 chunk 级——source 级指标高估了 8~14 个点
 - 语料里混着"面试题标准答案"，**存在语料同源问题**
 - 流式状态机用布尔变量表达，边界情况可能出错
-- **Rerank 单次推理 50~100 ms（CPU）**，249 条查询需 4~8 分钟；高并发场景需要优化
+- **Rerank 单次精排 CPU 上约 2~7 秒**（20 候选，本机实测，负载高时可达 13 秒；旧文档写的 50~100 ms 从未实测，且与"249 条 4~8 分钟"自相矛盾）
+- **评估脚本不可测**：`eval/`、`scripts/` 在 import 时就执行（加载模型/跑评估），无法被 pytest 导入，要拆出 `main()` 才能纳入测试
+- **测试未覆盖 Agent 编排与流式**：`create_agent` 主流程和 SSE 状态机没有自动化测试
 
 ## 学习路径
 

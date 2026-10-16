@@ -2,7 +2,7 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
-> 最后更新：2026-10-14（加 Redis 限流；语料 98 篇 / 583 chunk；MAX_DISTANCE 0.96；随机基线 3.0%）
+> 最后更新：2026-10-16（修复 MCP 会话与精排性能；修复 `/history` 越权、加多租户隔离；加测试与 CI；订正此前未实测的延迟数字；语料 98 篇 / 583 chunk；MAX_DISTANCE 0.96；随机基线 3.0%）
 
 ## 一、项目简介（30 秒版本）
 
@@ -99,7 +99,7 @@ FastAPI（api_agent.py）
 ## 四、核心功能
 
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启/容器重建都不丢
-- **API Key 鉴权**：`/chat` 和 `/chat/stream` 需要 Bearer token；`Header` + `Depends` 依赖注入
+- **API Key 鉴权**：`/chat`、`/chat/stream`、`/history` 需要 Bearer token；`Header` + `Depends` 依赖注入；多 key 按租户隔离数据
 - **Redis 限流**：按 API Key 限流，20 次/分钟（`incr + expire` 固定窗口，fail-open）
 - RAG 检索增强（本地 embedding + FAISS 向量库，98 篇 / 583 chunk）
 - **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
@@ -290,7 +290,7 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 | 类型 | 代表模型 | 输入 | 速度 | 精度 |
 |---|---|---|---|---|
 | 双塔（Embedding） | bge-small-zh-v1.5 | 单条文本 | 快（毫秒级） | 粗 |
-| 交叉编码器（Rerank） | bge-reranker-base | **(query, doc) 对** | 慢（百毫秒级） | 精 |
+| 交叉编码器（Rerank） | bge-reranker-base | **(query, doc) 对** | 慢（CPU 上秒级） | 精 |
 
 **实现**：
 
@@ -331,9 +331,11 @@ def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
 - 召回率 **+4.4%**，MRR **+0.05**
 - **Rerank 提升的主要是召回率**——混合检索直接返回 Top-3 会漏掉"相关但排名 4~20"的 chunk，Rerank 拿 Top-20 重新排，有机会把关键 chunk 顶上来
 
-**懒加载设计**：Reranker 模型 3.36 GB，加载要 10~20 秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**。
+**懒加载设计**：Reranker 模型约 1.1 GB（278M 参数），加载要数秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**。
 
-**性能问题**：249 条查询 × 20 候选 = 4980 次推理，CPU 上单次 50~100 ms，总耗时 **4~8 分钟**。高并发场景需要优化（更小模型 / GPU / 缓存）。
+**性能问题**：Rerank 要逐对推理。249 条查询 × 20 候选 = 4980 次推理，CPU 上精排 20 候选约 2~7 秒（本机实测），249 条跑完约 10~30 分钟。高并发场景需要优化（更小模型 / GPU / ONNX 量化）。
+
+> **订正（2026-10-16）**：早先写的"单次 50~100 ms"**从未实测**，且与"249 条 4~8 分钟"（≈1~2 s/query）自相矛盾。实测口径见 `docs/notes/08`。
 
 #### 5.5 降级策略（避免幻觉）
 
@@ -414,7 +416,7 @@ MAX_DISTANCE = 0.96
 | **Rerank 收益被语料规模压制** | 旧语料只有 2 篇 102 chunk，天花板效应 | 扩语料到 98 篇 583 chunk，Rerank 增益稳定为召回 +4.4%、MRR +0.05 |
 | **测试集太小导致判别力不足** | 30 条测试项，随机基线 84.1%，判别空间只有 15.9 个点 | 扩到 249 条 + 98 篇文档，随机基线降到 3.0%，判别空间 54.0 个点 |
 | **拆笔记文件 chunk 太集中** | `notes/07` 一个文件 74 chunks（含 25 道面试题） | 按 `###` 拆成 25 个独立文件，判别力提升 |
-| **接口裸奔** | 一开始没加鉴权，任何人都能调 | Bearer token + FastAPI `Depends` 依赖注入；`API_KEY` 从环境变量读 |
+| **接口裸奔 + 越权** | 一开始没鉴权；后来又发现 `/history` 无鉴权 + `thread_id` 有默认值，能按 thread_id 读任意会话（IDOR） | Bearer token + `Depends`；多 key 租户隔离 + `thread_id` 必填 + 历史表按 `owner` 过滤 |
 | **改代码每次 rebuild** | 代码/语料通过 COPY 打进镜像，改一行就要 rebuild | 开发期 volume 挂载，改代码 `docker compose restart` 即可；收尾时改回 COPY |
 | **限流未做** | Redis 依赖一直是"预留"，从没真正用过 | 按 API Key 限流（`incr + expire`），fail-open |
 
@@ -488,12 +490,12 @@ MAX_DISTANCE = 0.96
 ### 7. 并发量高怎么优化？
 
 - Agent 改用异步（astream / ainvoke）
-- MCP Server 常驻，不用每次启动
+- MCP Server 常驻（**已落地**：`client.session()` + `load_mcp_tools`，子进程只 spawn 一次，不再每次调用重启）
 - 向量库换 FAISS / Chroma 持久化版本
 - **加 Redis 限流（incr + expire）—— 已落地**
 - 多 worker 部署（uvicorn --workers N 或 gunicorn）
 - 反向代理（Nginx）分担负载
-- **Reranker 是瓶颈**：单条 query 精排约 50~100 ms（CPU），249 条需 4~8 分钟；高并发可换更小 Reranker 或加缓存
+- **Reranker 是瓶颈**：CPU 上精排 20 候选约 2~7 秒（本机实测），249 条约 10~30 分钟；高并发可换更小 Reranker / ONNX 量化 / 加缓存
 
 ### 8. 文档切分参数怎么定？
 
@@ -666,7 +668,7 @@ def friendly_error(e: Exception) -> str:
 
 - 用 uv + 虚拟环境管理依赖，避免全局冲突
 - 加 LangSmith 可观测性
-- 写单元测试和集成测试
+- ~~写单元测试和集成测试~~ → **已做（2026-10-16，见第 29 节）**
 - **评估升级到 chunk 级标注**（现在是文档级）
 - **加端到端评估**（LLM-as-judge 或人工标注）
 
@@ -860,7 +862,7 @@ from rag_core.search import hybrid_search, ...
 | 维度 | 双塔（bge-small） | 交叉编码器（bge-reranker） |
 |---|---|---|
 | 结构 | query 和 doc 分别编码 | (query, doc) 拼一起送进模型 |
-| 速度 | 快（毫秒级） | 慢（百毫秒级） |
+| 速度 | 快（毫秒级） | 慢（CPU 上秒级） |
 | 精度 | 粗 | 精 |
 | 用途 | 大规模召回 | 小规模精排 |
 
@@ -868,7 +870,7 @@ from rag_core.search import hybrid_search, ...
 1. **粗排**：混合检索召回 Top-20（保证召回率）
 2. **精排**：Reranker 打分保留 Top-3（保证精确率）
 
-**为什么不能只用 Reranker**：要对每条 (query, doc) 跑一次模型。583 个 chunk → 583 次推理，100 ms × 583 ≈ 58 秒/查询——太慢。所以先用双塔快速筛到 20 条，再用 Reranker 精排。
+**为什么不能只用 Reranker**：要对每条 (query, doc) 跑一次模型。583 个 chunk → 583 次推理，按实测约 0.1~0.35 秒/对算，单查询要 1~3 分钟——太慢。所以先用双塔快速筛到 20 条，再用 Reranker 精排。
 
 **效果**（249 条测试项，覆盖 83 篇文档）：
 
@@ -882,33 +884,36 @@ from rag_core.search import hybrid_search, ...
 - **Rerank 提升的主要是召回率**（把 Top-20 里被埋没的相关 chunk 顶上来）
 
 **诚实的局限**：
-- 249 条查询 × 20 候选 = 4980 次推理，CPU 上 50~100 ms/次，总耗时 **4~8 分钟**
-- 高并发场景需要优化（更小模型 / GPU / 缓存）
+- 249 条查询 × 20 候选 = 4980 次推理，CPU 上精排 20 候选约 2~7 秒（本机实测），249 条约 10~30 分钟
+- 高并发场景需要优化（更小模型 / GPU / ONNX 量化）
 
 **面试话术**：
-> "我加了两阶段检索：混合检索召回 Top-20，用 bge-reranker-base 交叉编码器精排 Top-3。在 249 条测试集上召回率从 52.6% 提到 57.0%，MRR 从 0.42 提到 0.47。Reranker 是懒加载的——第一次调用才加载 3.36 GB 模型，不拖慢服务启动。这里有个诚实的局限：Rerank 单次推理 CPU 上 50~100 ms，249 条查询需要 4~8 分钟，高并发场景需要优化。"
+> "我加了两阶段检索：混合检索召回 Top-20，用 bge-reranker-base 交叉编码器精排 Top-3。在 249 条测试集上召回率从 52.6% 提到 57.0%，MRR 从 0.42 提到 0.47。Reranker 是懒加载的——第一次调用才加载约 1.1 GB 模型，不拖慢服务启动。不过性能要诚实说：Rerank 在 CPU 上精排 20 候选约 2~7 秒，249 条跑完要十几到几十分钟，高并发场景得换更小的 reranker 或上 ONNX 量化。"
 
 ### 26. 为什么要加 API Key 鉴权？
 
-**问题**：`/chat` 和 `/chat/stream` 接口完全裸奔，任何人知道 URL 就能调。
+**问题**：接口完全裸奔，任何人知道 URL 就能调。后来又发现一个更隐蔽的问题：`/history` 没有鉴权、`thread_id` 有默认值 + 只有单个共享 key，等于**任何人能按 thread_id 读到别人的会话**（越权 / IDOR）。
 
-**方案**：Bearer token + FastAPI `Depends` 依赖注入。
+**方案**：Bearer token + FastAPI `Depends` 依赖注入，并且**把数据按租户隔离**。
 
 ```python
-API_KEY = os.getenv("API_KEY", "dev-key-change-me")
+_RAW_KEYS = os.getenv("API_KEYS") or os.getenv("API_KEY", "dev-key-change-me")
+_API_KEYS = [k.strip() for k in _RAW_KEYS.split(",") if k.strip()]
+
+def principal_of(token: str) -> str:              # key → 租户 id（不含密钥本身）
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 async def verify_key(authorization: str = Header(default="")) -> str:
-    if not authorization:
-        raise HTTPException(401, detail="缺少 Authorization 头")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, detail="Authorization 格式错误")
+    # ...解析 Bearer...
     token = authorization[7:].strip()
-    if token != API_KEY:
+    matched = next((k for k in _API_KEYS if hmac.compare_digest(k, token)), None)
+    if matched is None:
         raise HTTPException(403, detail="API Key 无效")
-    return token
+    return principal_of(matched)                  # 返回租户 id，不是 key
 
 @app.post("/chat")
-async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
+async def chat(payload: ChatRequest, principal: str = Depends(verify_key)):
+    effective_thread = f"{principal}:{payload.thread_id}"   # 命名空间隔离
     ...
 ```
 
@@ -919,12 +924,13 @@ async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
 | `Header` | FastAPI 自动从请求头取值 |
 | `Depends` | 依赖注入，接口调用前先跑 `verify_key` |
 | `401` vs `403` | 401 = 没带凭证；403 = 带了但不对 |
-| `API_KEY` 环境变量 | 密码外置，代码里不出现真实密钥 |
-| `${API_KEY:-默认}` | compose 从宿主机读，注入容器 |
-| `verify_key` 返回 token | 供后续限流用 |
+| `API_KEY` / `API_KEYS` 环境变量 | 密码外置，代码里不出现真实密钥 |
+| `hmac.compare_digest` | 恒时比较，避免 `==` 比密钥引入时序侧信道 |
+| `verify_key` 返回租户 id | 供限流 + 数据隔离用（不是 key 本身） |
+| **认证 ≠ 授权** | 认证只证明"你是谁"，"能读哪些数据"要各接口按 principal 过滤 |
 
 **面试话术**：
-> "接口加了 API Key 鉴权。用 FastAPI 的 `Header` + `Depends` 做依赖注入，`/chat` 和 `/chat/stream` 共用同一个 `verify_key`，鉴权逻辑和业务逻辑解耦。`API_KEY` 从环境变量读——本地 `.env` 一份，生产服务器一份，代码里不出现真实密钥。`docker-compose.yml` 里用 `${API_KEY:-dev-key-change-me}` 语法从宿主机读取，读不到用默认值。这样 yml 文件能安全提交，真实密码留在 `.env` 里。"
+> "接口加了 API Key 鉴权。用 FastAPI 的 `Header` + `Depends` 做依赖注入，鉴权逻辑和业务逻辑解耦。`API_KEY` 从环境变量读，代码里不出现真实密钥。后来我又发现两个问题：一是 `/history` 没加鉴权，二是 `thread_id` 有默认值 + 单个共享 key，导致**任何人都能按 thread_id 读别人的会话**（越权 / IDOR）。修法是：`/history` 加鉴权、`thread_id` 必填、并**把数据按租户隔离**——记忆用 `{租户}:{thread_id}` 做命名空间，历史表加 `owner` 列只查自己租户的。关键认知是**认证不等于授权**：光有 key 只能证明你是谁，还得在数据层按身份过滤。"
 
 ### 27. 为什么开发期用 volume 挂载？
 
@@ -1019,27 +1025,52 @@ docker exec -it agent-redis redis-cli ttl "rate:wzyyqw106"
 **面试话术**：
 > "我把 Redis 从'预留'变成'落地'——按 API Key 限流，20 次/分钟。用 `incr + expire` 做固定窗口，比滑动窗口简单，够用。关键设计是 **fail-open**：Redis 挂了就放行，限流是保护措施，不能让它成为新的单点故障。鉴权 + 限流是生产环境的两层保护：鉴权防'谁能调'，限流防'调多少次'。"
 
+### 29. 为什么要加测试和 CI？
+
+**问题**：功能全跑通，但**零自动化测试**——所有验证靠手工（起服务 + curl + 肉眼），改一行不知道会不会碰坏别处。
+
+**方案**：pytest 分两层 + GitHub Actions。
+
+| 层 | 覆盖 | 需要模型 |
+|---|---|---|
+| 单元 | 鉴权、租户隔离、`/history` 越权、输入校验、错误映射、限流（含 fail-open） | 否（打桩） |
+| 集成 | 索引加载、`hybrid_search`、距离阈值降级、精排开关 | 是（`pytest -m integration`） |
+
+**关键设计**：
+
+| 点 | 说明 |
+|---|---|
+| 接口测试**打桩** | 假 Agent / 假 MySQL / 假 Redis，不依赖真实 LLM/DB，2 秒跑完 |
+| 集成测试用 marker | 要下几百 MB 模型，不该每次 push 跑 → CI 跳过 |
+| 降级测试用**机制** | 把 `max_distance` 调到 `-1.0` 确定性触发，不赌某条查询的距离 |
+| CI 只跑单元测试 | push / PR 触发，防止"在我机器上能跑" |
+
+**顺带发现**：`eval/`、`scripts/` 在 import 时就执行，**无法被 pytest 导入**——可测试性是设计出来的，脚本要拆 `main()` 才能测。
+
+**面试话术**：
+> "项目一开始零自动化测试。加测试时发现 `eval/` 和 `scripts/` 在 import 时就执行、根本没法被测——这是可测试性的设计问题。我按测试金字塔分两层：单元测试打桩（假 Agent / 假 MySQL / 假 Redis），断言租户隔离和 SQL 条件；集成测试标记 `integration`，要下模型所以 CI 跳过。还踩了个坑：测'降级'不能靠一条查询赌它距离超阈值，把阈值调到不可能满足来确定性触发分支更可靠。最后加了 GitHub Actions，push 就自动跑单元测试——**CI 是'作品'和'工程'的分界线**。"
+
 ## 八、项目数据（面试时能报的具体数字）
 
 - 工具数量：1 个（search_knowledge）
 - **知识库文档数：98 篇 markdown（5 个子目录）**
 - **切分后块数：583 块**
 - Embedding 模型：BAAI/bge-small-zh-v1.5（512 维，双塔，192 MB）
-- **Rerank 模型：BAAI/bge-reranker-base（CrossEncoder，3.36 GB）**
+- **Rerank 模型：BAAI/bge-reranker-base（CrossEncoder，约 1.1 GB）**
 - 向量库：FAISS（本地持久化）
 - 检索策略：**两阶段检索**（混合检索召回 Top-20 + Rerank 精排 Top-3）
 - RRF 参数：k=60, vector_weight=0.7, bm25_weight=0.3
 - 降级阈值：MAX_DISTANCE=0.96（标定得出，P=0.990, R=1.000, F1=0.995）
 - 幻觉率：约 1.0%，漏答 0%（新标定）
 - 护栏参数：recursion_limit=10, max_tokens=2000
-- 鉴权：Bearer token（`/chat` 和 `/chat/stream`），`API_KEY` 从环境变量读
+- 鉴权：Bearer token（`/chat`、`/chat/stream`、`/history`），`API_KEY`/`API_KEYS` 从环境变量读，多 key 按租户隔离
 - 限流：Redis 固定窗口（`incr + expire`），按 API Key 限流 20 次/分钟，fail-open
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（SQLite 文件，重启不丢）
 - 展示层：MySQL（表 conversations）
 - **评估集：249 个测试项（自动生成），覆盖 83 篇文档**
 - **随机检索基线：3.0%**（判别空间 54.0 个点）
 - 首次 Docker 构建耗时：约 19 分钟（CUDA）→ **5~10 分钟**（CPU）
-- 单次请求耗时：2~3 秒（首次含 Reranker 加载 10~20 秒）
+- 单次请求耗时：约 7 秒（warm，本机 CPU 实测）；服务启动时一次性加载模型约 24 秒
 - 镜像大小：10.4 GB → **2.42 GB**（content 519 MB）
 - Docker 数据位置：`D:\Docker`（55.73 GB）
 - C 盘可用空间：10.20 GB → **65.25 GB**
@@ -1060,7 +1091,7 @@ docker exec -it agent-redis redis-cli ttl "rate:wzyyqw106"
 1. 打开 Swagger UI：http://127.0.0.1:8000/docs
 2. 测普通对话：POST /chat（带 Bearer token）
 3. 测流式对话：POST /chat/stream（带 Bearer token）
-4. 查看对话历史：GET /history?thread_id=user_001（无需鉴权）
+4. 查看对话历史：GET /history?thread_id=user_001（需 Bearer token，只返回自己租户的）
 5. **演示鉴权**：不带 token → 401；错误 token → 403；正确 token → 200
 6. **演示限流**：连打 21 次 → 前 20 次 200，第 21 次 429
 7. **演示持久化记忆**：问"MMR 是什么" → **`docker compose down` 完全销毁容器** → `up -d` → 问"它和普通相似度有什么区别" → 仍能理解
@@ -1113,7 +1144,7 @@ docker exec -it agent-redis redis-cli ttl "rate:wzyyqw106"
 
 **bge-reranker-base 的选择理由**：
 - 中英双语都支持
-- 3 GB 大小，CPU 上单条推理 50~100 ms
+- 约 1.1 GB / 278M 参数，CPU 上精排 20 候选约 2~7 秒（本机实测）
 - 有开源权重，完全离线
 
 ### Rerank 是什么
@@ -1169,10 +1200,12 @@ docker exec -it agent-redis redis-cli ttl "rate:wzyyqw106"
 ```sql
 CREATE TABLE conversations (
     id INT PRIMARY KEY AUTO_INCREMENT,
-    thread_id VARCHAR(64),
+    owner VARCHAR(32) NOT NULL,            -- 租户 id（API key 派生），用于隔离
+    thread_id VARCHAR(64) NOT NULL,
     role VARCHAR(20),
     content TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_owner_thread (owner, thread_id)
 );
 ```
 
@@ -1591,7 +1624,7 @@ for /L %i in (1,1,21) do @curl.exe ... -w "%i : %{http_code}\n" ...
 | 容器重建后记忆怎么不丢？ | checkpoints volume 挂载到宿主机 ./data/ |
 | 错误信息怎么处理？ | `friendly_error` 映射，用异常类型判断 |
 | 检索不到内容怎么处理？ | 距离阈值降级（标定 0.96），返回"没找到"，不调 LLM |
-| 接口鉴权怎么做？ | Bearer token + `Depends` 依赖注入；`API_KEY` 从环境变量读 |
+| 接口鉴权怎么做？ | Bearer token + `Depends` 依赖注入；`API_KEY`/`API_KEYS` 从环境变量读；认证 ≠ 授权，数据按租户过滤 |
 | 限流怎么做？ | Redis 固定窗口 `incr + expire`，按 API Key，fail-open |
 | 为什么用 `Depends` 不用手动调？ | 鉴权逻辑抽出来，多接口共用，改一处生效 |
 | 开发期怎么快速迭代？ | volume 挂载代码/语料，`docker compose restart` 不用 rebuild |
@@ -1797,7 +1830,7 @@ def random_baseline(test_set, all_docs, k=3):
 | `save_conversation` | 每次请求新建连接，没有连接池 | 用连接池（如 `DBUtils`） |
 | 流式状态机 | 用三个布尔变量表达状态，边界情况可能出错 | 改用 `metadata["langgraph_node"]` + 显式状态机 |
 | MCP Server 用了私有 API | `vectorstore.docstore._dict` 是内部 API，版本升级可能坏 | 构建索引时自己维护 chunks 列表并 pickle 落盘 |
-| **Reranker 性能** | CPU 单次 50~100 ms，249 条需 4~8 分钟 | 更小模型 / GPU / 缓存 |
+| **Reranker 性能** | CPU 精排 20 候选约 2~7 秒，249 条约 10~30 分钟 | 更小模型 / GPU / ONNX 量化 |
 | **chunk 级评估** | 现在是文档级 | 标注 chunk id |
 
 ### 改进方案
@@ -1820,9 +1853,12 @@ def random_baseline(test_set, all_docs, k=3):
 | 阈值标定 | 正负样本距离分布 + PR 曲线 | ✅ 已做（MAX_DISTANCE 1.0→0.96） |
 | Rerank 精排 | bge-reranker-base 对 Top-20 重排 | ✅ 已做（召回率 +4.4%） |
 | API Key 鉴权 | Bearer token + Depends | ✅ 已做 |
+| **鉴权加固** | 多 key 租户隔离 + `/history` 鉴权 + `thread_id` 必填（修越权 IDOR） | ✅ 已做（2026-10-16） |
 | Redis 限流 | 按 API Key，20/分钟，fail-open | ✅ 已做 |
 | **语料扩充** | 2 篇 → 98 篇 | ✅ 已做 |
 | **测试集自动生成** | 30 条 → 249 条 | ✅ 已做 |
+| **MCP 常驻 session** | `client.session()` + `load_mcp_tools`，子进程只 spawn 一次 | ✅ 已做（2026-10-16） |
+| **检索可配置** | `RAG_RECALL_K` / `RAG_RERANK_MAX_LENGTH` / `RAG_ENABLE_RERANK` | ✅ 已做（2026-10-16） |
 | Chunk 级评估 | 标注 chunk id，不只标文档 | ⏳ 待做 |
 | 端到端评估 | LLM-as-judge 或人工标注 | ⏳ 待做 |
 
@@ -1986,9 +2022,50 @@ torch
 
 ### 14.5 面试话术（Docker 部署）
 
-> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，3.36 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 0.96，P=0.990、R=1.000、F1=0.995。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，召回率从 52.6% 提到 57.0%。当前知识库 98 篇文档 / 583 chunk，评估集 249 条，随机基线 3.0%。接口加了 API Key 鉴权和 Redis 限流——鉴权防'谁能调'，限流防'调多少次'，限流用 `incr + expire` 固定窗口，fail-open。开发期把代码和语料目录做成 volume 挂载，改代码只要 `docker compose restart`，不用 rebuild。docker compose up -d 一条命令就能起完整服务：MySQL + Redis + Agent API。"
+> "我的项目用 Docker 多阶段构建 + CPU 版 torch，镜像从 3.51 GB 优化到 2.42 GB。Docker 数据落在 D 盘避免占满 C 盘。MCP Server 需要两个模型：bge-small-zh-v1.5（embedding，192 MB）和 bge-reranker-base（rerank，约 1.1 GB），我都下到宿主机 `hf_cache/` 然后 volume 挂载进容器。checkpoints.db 也挂到宿主机 `./data/`，这样 `docker compose down` 后容器重建，Agent 的记忆也不会丢。检索逻辑抽到 `rag_core/search.py`，服务端和评估脚本共用同一份代码。降级阈值 MAX_DISTANCE 通过正负样本距离分布标定为 0.96，P=0.990、R=1.000、F1=0.995。检索用两阶段 pipeline：混合检索召回 Top-20 + Rerank 精排 Top-3，召回率从 52.6% 提到 57.0%。当前知识库 98 篇文档 / 583 chunk，评估集 249 条，随机基线 3.0%。接口加了 API Key 鉴权和 Redis 限流——鉴权防'谁能调'，限流防'调多少次'，限流用 `incr + expire` 固定窗口，fail-open。开发期把代码和语料目录做成 volume 挂载，改代码只要 `docker compose restart`，不用 rebuild。docker compose up -d 一条命令就能起完整服务：MySQL + Redis + Agent API。"
 
 ## 十五、项目新增数据（更新）
+
+### 性能修复（2026-10-16）
+
+**问题**：文档里写的"MCP Server 常驻""单次请求 2~3 秒""Rerank 单次 50~100 ms"**从未实测**，与代码实际行为不符。
+
+**实测（本机 CPU，负载波动大）**：
+- `client.get_tools()` 是**每次工具调用新建 session** → 重新 spawn `mcp_rag_server.py` 子进程 + 重载全部模型：**第 1 次 44.1s / 第 2 次 35.2s**。
+- 进程内拆解单次检索：embed 9ms、向量检索 15ms、BM25 <1ms，**Rerank 占绝对大头**（20 候选，空闲约 2~7s）。
+
+**修复**：
+1. MCP 改**常驻 session**（`client.session()` + `load_mcp_tools`）→ 每调用 **44s/35s → 12.9s / 7.3s / 7.3s**。
+2. MCP 工具改 async + `anyio.to_thread`，避免同步检索阻塞 MCP server 事件循环。
+3. Rerank 配置化（不改变默认口径）：`RAG_RECALL_K`（默认 20）、`RAG_RERANK_MAX_LENGTH`、`RAG_ENABLE_RERANK`。
+4. 服务启动时预热一次检索，把 reranker 加载成本前移到启动阶段。
+
+**候选数取舍**：实测候选 20→10 能让精排耗时近似减半，但 **Rerank 召回从 57.0% 掉到 53.8%、增益从 +4.4 塌缩到 +1.2**，故默认保留 20。
+
+**订正的数字**：Rerank 模型 3.36 GB → **约 1.1 GB（278M 参数）**；单次请求 2~3 秒 → **约 7~13 秒（warm）**；Rerank 单次 50~100 ms → **约 2~7 秒（20 候选）**。
+
+### 工程化：测试与 CI（2026-10-16）
+
+- 加 **pytest** 测试套件（`tests/`）：单元测试覆盖鉴权、租户隔离、越权、输入校验、错误映射、限流；集成测试覆盖检索层
+- 接口测试用**打桩**（假 Agent / 假 MySQL / 假 Redis），不依赖真实 LLM 或数据库，2~3 秒跑完
+- 集成测试用 `@pytest.mark.integration` 标记（需下载模型），CI 跳过
+- 加 **GitHub Actions**（`.github/workflows/ci.yml`）：push / PR 跑单元测试
+- 顺带发现：`eval/`、`scripts/` 在 import 时就执行，**无法被 pytest 导入**——要拆 `main()` 才能纳入测试（已知不足）
+
+### 安全修复：越权读取（2026-10-16）
+
+**问题**：`/history` 无鉴权 + `thread_id` 有默认值 `user_001` + 只有单个共享 key → **任何人按 thread_id 就能读到别人的会话**（越权 / IDOR）。
+
+**修复**：
+1. `/history` 加 `Depends(verify_key)` 鉴权。
+2. `thread_id` 去掉默认值，改为必填（`Field(min_length=1, max_length=48)`）。
+3. 支持多 key（`API_KEYS`，逗号分隔），**每个 key 一个独立租户**：
+   - 鉴权返回租户 id（`sha256(key)[:16]`），不是 key 本身
+   - 记忆按 `{租户}:{thread_id}` 命名空间隔离
+   - 历史表加 `owner` 列，`/history` 查询带 `owner = 当前租户`
+4. 密钥校验改用 `hmac.compare_digest`（恒时比较，避免时序侧信道）。
+
+**核心认知**：**认证（你是谁）≠ 授权（你能访问什么）**。光有 API key 只能证明调用方身份，还必须在数据层按身份过滤。
 
 ### 部署相关（2026-10-08 ~ 2026-10-14）
 
@@ -2004,7 +2081,7 @@ torch
 - MAX_DISTANCE：1.1 → 1.0 → **0.96**
 - 阈值标定结果：P=0.990、R=1.000、F1=0.995
 - 幻觉率：9.1% → **约 1.0%**（漏答 0%）
-- Reranker 模型：bge-reranker-base（3.36 GB，本地缓存）
+- Reranker 模型：bge-reranker-base（约 1.1 GB，本地缓存）
 - **Rerank 提升：召回率 52.6% → 57.0%，MRR 0.42 → 0.47**
 - **语料扩充：2 篇 → 98 篇，chunk 102 → 583**
 - **测试集扩充：30 条 → 249 条，随机基线 84.1% → 3.0%**
@@ -2051,7 +2128,7 @@ torch
 - Rerank 增益：召回率 +4.4%，MRR +0.05
 - 混合检索 vs 相似度：+2.0%
 - 护栏参数：recursion_limit=10, max_tokens=2000
-- 鉴权：Bearer token（`/chat` 和 `/chat/stream`），`API_KEY` 从环境变量读
+- 鉴权：Bearer token（`/chat`、`/chat/stream`、`/history`），`API_KEY`/`API_KEYS` 从环境变量读，多 key 按租户隔离
 - 限流：Redis 固定窗口（`incr + expire`），按 API Key 限流 20 次/分钟，fail-open
 - Redis 服务：`redis:7` 镜像，容器名 `agent-redis`，端口 6379
 - 记忆：LangGraph checkpointer + AsyncSqliteSaver（容器重建不丢）
