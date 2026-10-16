@@ -46,6 +46,8 @@ services:
       - DATA_DIR=/app/data
       # API Key 鉴权：从宿主机 .env 读 API_KEY，读不到就用默认值
       - API_KEY=${API_KEY:-dev-key-change-me}
+      # 多 key（可选）：每个 key 一个独立租户，逗号分隔；设置了则优先于 API_KEY
+      - API_KEYS=${API_KEYS:-}
       # 限流配额：每分钟最多多少次（按 API Key 计）
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-20}
     volumes:

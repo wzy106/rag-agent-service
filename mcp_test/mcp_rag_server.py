@@ -20,6 +20,7 @@ from rag_core.search import (
     DEFAULT_INDEX_DIR,
 )
 
+import anyio
 from fastmcp import FastMCP
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -71,17 +72,20 @@ mcp = FastMCP("RAG Knowledge Server")
 
 
 @mcp.tool
-def search_knowledge(query: str) -> str:
+async def search_knowledge(query: str) -> str:
     """从知识库中检索与问题相关的信息，返回最相关的文档片段。"""
-    # 两阶段检索：混合检索召回 Top-20 → Reranker 精排 Top-3
-    results = hybrid_search_with_rerank(
-        query,
-        vectorstore=vectorstore,
-        bm25=bm25,
-        all_docs=all_docs,
-        recall_k=20,
-        final_k=3,
-        verbose=True,
+    # 两阶段检索：混合检索召回 Top-N（配置 RECALL_K）→ Reranker 精排 Top-3。
+    # 检索是 CPU 密集的同步逻辑，丢到线程池执行，避免阻塞 MCP server 的事件循环
+    # （否则并发的工具调用会被串行化）。
+    results = await anyio.to_thread.run_sync(
+        lambda: hybrid_search_with_rerank(
+            query,
+            vectorstore=vectorstore,
+            bm25=bm25,
+            all_docs=all_docs,
+            final_k=3,
+            verbose=True,
+        )
     )
 
     # 降级：没有相关结果

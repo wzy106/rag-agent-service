@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--strict-markers"
+markers = [
+    "integration: 需要本地 HF 模型 / FAISS 索引，CI 默认跳过（用 pytest -m integration 单独跑）",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore:pkg_resources is deprecated:UserWarning",
+]

@@ -1,19 +1,24 @@
 import os
 import json
 import time
+import hmac
+import hashlib
 import asyncio
 import pymysql
 import redis
+from typing import Annotated
+from datetime import timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 # 找 .env
@@ -24,19 +29,40 @@ load_dotenv(env_path)
 RECURSION_LIMIT = 10
 MAX_TOKENS = 2000
 
-# ===== API Key 鉴权 =====
-API_KEY = os.getenv("API_KEY", "dev-key-change-me")
+# ===== API Key 鉴权（认证 + 租户识别）=====
+# 支持逗号分隔的多个 key：每个 key 是一个独立租户（principal）。
+# 只有一个 key 时，所有持有者属于同一租户——真正的多租户隔离需要一 key 一人。
+# 未配置 API_KEYS 时回退到单个 API_KEY（向后兼容）。
+_RAW_KEYS = os.getenv("API_KEYS") or os.getenv("API_KEY", "dev-key-change-me")
+_API_KEYS = [k.strip() for k in _RAW_KEYS.split(",") if k.strip()]
+
+def principal_of(token: str) -> str:
+    """把 API key 映射成稳定的、不含密钥本身的租户 id（用于隔离各租户数据）。"""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+def _match_key(token: str) -> str | None:
+    """遍历所有已配置 key 做恒时比较，避免用 == 比密钥引入的时序侧信道。"""
+    matched = None
+    for key in _API_KEYS:
+        if hmac.compare_digest(key, token):
+            matched = key
+    return matched
 
 async def verify_key(authorization: str = Header(default="")) -> str:
-    """校验 Bearer token，返回 token 供限流使用。"""
+    """校验 Bearer token，返回该 key 对应的租户 id（principal）——而不是 key 本身。
+
+    认证（你是谁）≠ 授权（你能访问什么）：这里只负责认证并给出身份，
+    具体能读到哪些数据，由各接口按 principal 过滤。
+    """
     if not authorization:
         raise HTTPException(status_code=401, detail="缺少 Authorization 头")
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authorization 格式错误，应为 'Bearer <token>'")
     token = authorization[7:].strip()
-    if token != API_KEY:
+    matched = _match_key(token)
+    if matched is None:
         raise HTTPException(status_code=403, detail="API Key 无效")
-    return token
+    return principal_of(matched)
 
 # ===== Redis 限流 =====
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
@@ -55,14 +81,14 @@ def _get_redis():
         )
     return _redis_client
 
-def rate_limit(key: str):
-    """固定窗口限流：每分钟最多 RATE_LIMIT_PER_MINUTE 次。
+def rate_limit(principal: str):
+    """固定窗口限流：每分钟最多 RATE_LIMIT_PER_MINUTE 次，按租户（API key）计。
 
     Redis 不可用时放行（fail-open）——限流是保护措施，不能让它挂掉主流程。
     """
     try:
         r = _get_redis()
-        redis_key = f"rate:{key}"
+        redis_key = f"rate:{principal}"
         current = r.incr(redis_key)
         if current == 1:
             r.expire(redis_key, 60)
@@ -96,51 +122,71 @@ def friendly_error(e: Exception) -> str:
     return "服务暂时不可用，请稍后再试"
 
 # ===== MySQL 对话历史（展示层） =====
-def save_conversation(thread_id: str, role: str, content: str):
-    conn = pymysql.connect(
+def _connect():
+    return pymysql.connect(
         host=os.getenv("MYSQL_HOST", "localhost"),
         port=int(os.getenv("MYSQL_PORT", "3306")),
         user=os.getenv("MYSQL_USER", "root"),
         password=os.getenv("MYSQL_PASSWORD", "root123"),
         database=os.getenv("MYSQL_DATABASE", "agent"),
-        charset="utf8mb4"
+        charset="utf8mb4",
     )
+
+def save_conversation(owner: str, thread_id: str, role: str, content: str):
+    conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO conversations (thread_id, role, content) VALUES (%s, %s, %s)",
-                (thread_id, role, content)
+                "INSERT INTO conversations (owner, thread_id, role, content) VALUES (%s, %s, %s, %s)",
+                (owner, thread_id, role, content)
             )
         conn.commit()
     finally:
         conn.close()
 
 def ensure_table():
-    conn = pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "localhost"),
-        port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=os.getenv("MYSQL_USER", "root"),
-        password=os.getenv("MYSQL_PASSWORD", "root123"),
-        database=os.getenv("MYSQL_DATABASE", "agent"),
-        charset="utf8mb4"
-    )
+    conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
                     id INT PRIMARY KEY AUTO_INCREMENT,
-                    thread_id VARCHAR(64),
+                    owner VARCHAR(32) NOT NULL,
+                    thread_id VARCHAR(64) NOT NULL,
                     role VARCHAR(20),
                     content TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_owner_thread (owner, thread_id)
                 )
             """)
+            # 老库补 owner 列（幂等：列/索引已存在时报 1060/1061，忽略）
+            for ddl in (
+                "ALTER TABLE conversations ADD COLUMN owner VARCHAR(32) NOT NULL DEFAULT ''",
+                "ALTER TABLE conversations ADD INDEX idx_owner_thread (owner, thread_id)",
+            ):
+                try:
+                    cur.execute(ddl)
+                except pymysql.err.OperationalError:
+                    pass
         conn.commit()
     finally:
         conn.close()
 
 # 全局 agent
 agent = None
+
+async def _prewarm(tools):
+    """启动时跑一次检索，触发 MCP Server 里 Reranker 的懒加载，避免首个请求替我们付加载成本。"""
+    search_tool = next((t for t in tools if t.name == "search_knowledge"), None)
+    if search_tool is None:
+        return
+    try:
+        t0 = time.time()
+        await search_tool.ainvoke({"query": "预热"})
+        print(f"[启动] 检索预热完成（{time.time() - t0:.1f}s）")
+    except Exception as e:
+        # 预热失败不阻断启动，首个真实请求再加载即可
+        print(f"[启动] 预热失败（不影响启动）：{type(e).__name__}: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -152,10 +198,10 @@ async def lifespan(app: FastAPI):
             "command": "python",
             "args": [str(Path(__file__).resolve().parent.parent / "mcp_test" / "mcp_rag_server.py")],
             "transport": "stdio",
+            # 常驻 session 默认没有读超时；设一个上限，避免工具卡死时请求永久挂起
+            "session_kwargs": {"read_timeout_seconds": timedelta(seconds=60)},
         }
     })
-    tools = await client.get_tools()
-    print(f"[启动] 从 MCP 加载了 {len(tools)} 个工具：{[t.name for t in tools]}")
 
     model = ChatOpenAI(
         model="deepseek-chat",
@@ -171,18 +217,27 @@ async def lifespan(app: FastAPI):
     data_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = str(data_dir / "checkpoints.db")
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
-        agent = create_agent(
-            model,
-            tools=tools,
-            checkpointer=saver,
-            system_prompt="你是一个知识助手，回答问题时优先调用 search_knowledge 工具查询知识库。"
-        )
-        print(f"[启动] Agent 创建完成（持久化记忆 + 护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}）")
+        # 常驻 session：MCP Server 子进程整个服务生命周期只拉起一次，模型/索引也只加载一次。
+        # 注意不要用 client.get_tools()——它每次工具调用都会新建 session，
+        # 等于每次调用都重新 spawn 子进程 + 重载全部模型（实测 35~44s/次）。
+        async with client.session("rag") as session:
+            tools = await load_mcp_tools(session)
+            print(f"[启动] 从 MCP 加载了 {len(tools)} 个工具：{[t.name for t in tools]}")
 
-        ensure_table()
-        print("[启动] MySQL 表检查完成")
+            agent = create_agent(
+                model,
+                tools=tools,
+                checkpointer=saver,
+                system_prompt="你是一个知识助手，回答问题时优先调用 search_knowledge 工具查询知识库。"
+            )
+            print(f"[启动] Agent 创建完成（持久化记忆 + 护栏：recursion_limit={RECURSION_LIMIT}, max_tokens={MAX_TOKENS}）")
 
-        yield
+            ensure_table()
+            print("[启动] MySQL 表检查完成")
+
+            await _prewarm(tools)
+
+            yield
 
     print("[关闭] 服务停止")
 
@@ -196,9 +251,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# thread_id 必填且限长：不设默认值，避免所有调用方不传时挤进同一个会话（串记忆/串历史）
+ThreadId = Annotated[str, Field(min_length=1, max_length=48, description="会话 id，同一租户内用于区分会话")]
+
 class ChatRequest(BaseModel):
     message: str
-    thread_id: str = "user_001"
+    thread_id: ThreadId
 
 class ChatResponse(BaseModel):
     reply: str
@@ -208,12 +266,14 @@ def root():
     return {"message": "Agent API is running"}
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
-    rate_limit(token)
+async def chat(payload: ChatRequest, principal: str = Depends(verify_key)):
+    rate_limit(principal)
     thread_id = payload.thread_id
+    # 记忆按租户命名空间隔离：同一个 thread_id 在不同 key 下互不影响
+    effective_thread = f"{principal}:{thread_id}"
 
     config = {
-        "configurable": {"thread_id": thread_id},
+        "configurable": {"thread_id": effective_thread},
         "recursion_limit": RECURSION_LIMIT,
     }
 
@@ -229,32 +289,25 @@ async def chat(payload: ChatRequest, token: str = Depends(verify_key)):
 
     # 写 MySQL（展示层，失败不影响主流程）
     try:
-        save_conversation(thread_id, "human", payload.message)
-        save_conversation(thread_id, "ai", answer)
+        save_conversation(principal, thread_id, "human", payload.message)
+        save_conversation(principal, thread_id, "ai", answer)
     except Exception as e:
         print(f"[MySQL 写入失败] {type(e).__name__}: {str(e)}")
 
     return ChatResponse(reply=answer)
 
 @app.get("/history")
-def get_history(thread_id: str = "user_001", limit: int = 20):
-    # limit 上限保护
-    limit = min(limit, 100)
+def get_history(thread_id: str, limit: int = 20, principal: str = Depends(verify_key)):
+    # 只返回「调用方自己租户」下的会话记录，避免越权读别人的历史
+    limit = min(max(limit, 1), 100)
 
-    conn = pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "localhost"),
-        port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=os.getenv("MYSQL_USER", "root"),
-        password=os.getenv("MYSQL_PASSWORD", "root123"),
-        database=os.getenv("MYSQL_DATABASE", "agent"),
-        charset="utf8mb4"
-    )
+    conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT role, content, created_at FROM conversations "
-                "WHERE thread_id = %s ORDER BY created_at DESC LIMIT %s",
-                (thread_id, limit)
+                "WHERE owner = %s AND thread_id = %s ORDER BY created_at DESC LIMIT %s",
+                (principal, thread_id, limit)
             )
             rows = cur.fetchall()
     finally:
@@ -270,13 +323,14 @@ def get_history(thread_id: str = "user_001", limit: int = 20):
 
 class StreamRequest(BaseModel):
     message: str
-    thread_id: str = "user_001"
+    thread_id: ThreadId
 
 @app.post("/chat/stream")
-async def chat_stream(payload: StreamRequest, token: str = Depends(verify_key)):
-    rate_limit(token)
+async def chat_stream(payload: StreamRequest, principal: str = Depends(verify_key)):
+    rate_limit(principal)
     start_time = time.time()
     thread_id = payload.thread_id
+    effective_thread = f"{principal}:{thread_id}"
     print(f"[请求] 收到消息：{payload.message}（thread_id={thread_id}）")
 
     async def event_generator():
@@ -287,7 +341,7 @@ async def chat_stream(payload: StreamRequest, token: str = Depends(verify_key)):
             full_answer = ""
 
             config = {
-                "configurable": {"thread_id": thread_id},
+                "configurable": {"thread_id": effective_thread},
                 "recursion_limit": RECURSION_LIMIT,
             }
 
@@ -322,8 +376,8 @@ async def chat_stream(payload: StreamRequest, token: str = Depends(verify_key)):
 
             # 写 MySQL（展示层，失败不影响主流程）
             try:
-                save_conversation(thread_id, "human", payload.message)
-                save_conversation(thread_id, "ai", full_answer)
+                save_conversation(principal, thread_id, "human", payload.message)
+                save_conversation(principal, thread_id, "ai", full_answer)
             except Exception as e:
                 print(f"[MySQL 写入失败] {type(e).__name__}: {str(e)}")
 

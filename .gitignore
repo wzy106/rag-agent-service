@@ -4,6 +4,9 @@ __pycache__/
 *.pyo
 *.pyd
 
+# 测试缓存
+.pytest_cache/
+
 # 环境变量（含密钥）
 .env
 

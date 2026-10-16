@@ -48,6 +48,18 @@ DEFAULT_INDEX_DIR = Path(__file__).resolve().parent.parent / "faiss_index"
 # Rerank 模型
 RERANKER_MODEL = "BAAI/bge-reranker-base"
 
+# ===== 检索 / 精排配置（环境变量可覆盖）=====
+# 服务端和评估脚本共用同一份配置，保证"评估跑的就是部署的代码"。
+
+# 粗排召回候选数：Rerank 耗时与候选数近似线性，候选越少越快，但会伤召回率。
+# 实测（249 条测试集）：k=20 时 Rerank 召回 57.0%；k=10 时掉到 53.8%，且 Rerank 增益
+# 从 +4.4 塌缩到 +1.2。故默认保留 20；追求极致延迟可调小（代价是召回）。
+RECALL_K = int(os.getenv("RAG_RECALL_K", "20"))
+# Reranker 输入截断长度（token），越大越准也越慢。
+RERANK_MAX_LENGTH = int(os.getenv("RAG_RERANK_MAX_LENGTH", "512"))
+# 精排开关：置 0/false/no 则跳过 Rerank，直接返回粗排 Top-k（快速降级用）。
+ENABLE_RERANK = os.getenv("RAG_ENABLE_RERANK", "1").lower() not in ("0", "false", "no")
+
 
 class LocalEmbeddings(Embeddings):
     def __init__(self, model_name: str = DEFAULT_MODEL):
@@ -173,8 +185,8 @@ def _get_reranker():
     global _reranker
     if _reranker is None:
         from sentence_transformers import CrossEncoder
-        print(f"[Reranker] 加载 {RERANKER_MODEL}...", file=sys.stderr)
-        _reranker = CrossEncoder(RERANKER_MODEL, max_length=512)
+        print(f"[Reranker] 加载 {RERANKER_MODEL}（max_length={RERANK_MAX_LENGTH}）...", file=sys.stderr)
+        _reranker = CrossEncoder(RERANKER_MODEL, max_length=RERANK_MAX_LENGTH)
         print(f"[Reranker] 加载完成", file=sys.stderr)
     return _reranker
 
@@ -220,7 +232,7 @@ def hybrid_search_with_rerank(
     vectorstore,
     bm25,
     all_docs,
-    recall_k: int = 20,
+    recall_k: int | None = None,
     final_k: int = 3,
     verbose: bool = False,
     **hybrid_kwargs,
@@ -229,15 +241,18 @@ def hybrid_search_with_rerank(
     混合检索 + Rerank 的完整 pipeline（两阶段检索）。
 
     流程：
-        1. hybrid_search 粗排召回 recall_k 条（默认 20）
-        2. rerank 精排到 final_k 条（默认 3）
+        1. hybrid_search 粗排召回 recall_k 条（默认取配置 RECALL_K）
+        2. rerank 精排到 final_k 条（默认 3）；ENABLE_RERANK=0 时跳过本步
 
     参数：
-        recall_k: 粗排阶段保留多少条（建议 20）
+        recall_k: 粗排阶段保留多少条；None 时用配置 RECALL_K
         final_k: 精排后返回多少条（默认 3）
         verbose: 是否打印中间过程到 stderr
         **hybrid_kwargs: 传给 hybrid_search 的其他参数（rrf_k、权重等）
     """
+    if recall_k is None:
+        recall_k = RECALL_K
+
     # 1. 粗排：混合检索召回
     candidates = hybrid_search(
         query,
@@ -252,5 +267,10 @@ def hybrid_search_with_rerank(
     if not candidates:
         return []
 
-    # 2. 精排：Reranker 打分
+    # 2. 精排：Reranker 打分（可用 ENABLE_RERANK=0 关闭，直接返回粗排 Top-k）
+    if not ENABLE_RERANK:
+        if verbose:
+            print("[Rerank] 已禁用（RAG_ENABLE_RERANK=0），返回粗排 Top-k", file=sys.stderr)
+        return candidates[:final_k]
+
     return rerank(query, candidates, top_k=final_k, verbose=verbose)

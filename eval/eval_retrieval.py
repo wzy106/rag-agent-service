@@ -87,13 +87,12 @@ def search_hybrid(q, k):
     return hybrid_search(q, vectorstore, bm25, all_docs, k=k, verbose=False)
 
 def search_hybrid_rerank(q, k):
-    """两阶段检索：混合检索召回 Top-20 → Reranker 精排 Top-k"""
+    """两阶段检索：混合检索召回 Top-N（配置 RECALL_K）→ Reranker 精排 Top-k"""
     return hybrid_search_with_rerank(
         q,
         vectorstore=vectorstore,
         bm25=bm25,
         all_docs=all_docs,
-        recall_k=20,
         final_k=k,
         verbose=False,
     )
