@@ -1,6 +1,6 @@
 # RAG Agent 服务
 
-基于 LangChain + LangGraph + MCP + RAG 的企业级 Agent 服务，支持 SSE 流式输出，持久化记忆，API Key 鉴权，Redis 限流，Docker 容器化部署。
+基于 LangChain + LangGraph + MCP + RAG 的 Agent 服务，支持 SSE 流式输出、多轮记忆持久化、API Key 多租户鉴权、Redis 限流、Docker 部署，并自带一套可复现的检索评估体系（249 条测试集 + 随机基线）。
 
 ## 架构
 
