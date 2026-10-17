@@ -1,218 +1,217 @@
-"""
-MAX_DISTANCE 阈值标定脚本
+"""MAX_DISTANCE 阈值标定（区分 easy / hard 负样本）。
 
-思路：
-- 正样本（来自 test_set_v2.json，抽样 100 条）：知识库中应该能命中
-- 负样本（来自 negatives.json）：知识库中明显没有
-- 对每条问题用 similarity_search_with_score 拿 best_distance
-- 画正负样本距离分布直方图，找分离点
-- 扫 MAX_DISTANCE 从 0.5 到 1.5，画 PR 曲线
-- 找 F1 最大点 + Precision >= 0.95 的最高召回点
+注意：这里衡量的是**检索层是否接受一个 query**，不是端到端幻觉率。
+- FPR = FP / (FP + TN)：负样本被接受的比例。
+- FDR = FP / (TP + FP)：被接受的结果里，负样本占的比例；依赖正负样本的抽样基率。
 
 跑法：
-    cd D:/Projects/Agent
-    python eval/calibrate_distance.py
-
-输出：
-    eval/output/distance_distribution.png
-    eval/output/pr_curve.png
-    命令行统计表 + 推荐阈值
-
-注意：
-- 语料扩展后（102 → 576 chunk），旧的 test_set.json 已废弃（expected_sources 指向已删除的旧文档）
-- 正样本改用 test_set_v2.json 抽样（固定随机种子，可复现）
-- 阈值相关输出用 MAX_DISTANCE 常量，不再硬编码
+    python eval/calibrate_distance.py \
+        --positives eval/test_set_v3_gold.json \
+        --negatives eval/negatives.json eval/negatives_hard.json \
+        --output eval/output/calibration_v3.json
 """
-import os
-import sys
+from __future__ import annotations
+
+import argparse
 import json
 import random
+import sys
+from collections import Counter
 from pathlib import Path
 
-# ===== 确保能找到项目根的 rag_core 包 =====
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from rag_core.search import (
-    load_vectorstore,
-    LocalEmbeddings,
-    DEFAULT_MODEL,
-    MAX_DISTANCE,
-)
+from rag_core.search import DEFAULT_MODEL, MAX_DISTANCE, LocalEmbeddings, load_vectorstore
 
 
-# ===== 加载数据 =====
-print("加载 embedding 和 FAISS 索引...")
-embedding = LocalEmbeddings(DEFAULT_MODEL)
-vectorstore = load_vectorstore(embedding=embedding)
-
-EVAL_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = EVAL_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-# 正样本从新测试集 test_set_v2.json 抽样 100 条（全跑 249 条太慢）
-# 旧 test_set.json（30 条）的 expected_sources 指向已删除的旧文档，不能用
-with open(EVAL_DIR / "test_set_v2.json", encoding="utf-8") as f:
-    positives_all = [item["question"] for item in json.load(f)]
-    random.seed(42)  # 固定种子，保证可复现
-    positives = random.sample(positives_all, min(100, len(positives_all)))
-
-with open(EVAL_DIR / "negatives.json", encoding="utf-8") as f:
-    negatives = json.load(f)["questions"]
-
-print(f"正样本：{len(positives)} 条（从 {len(positives_all)} 条中抽样）")
-print(f"负样本：{len(negatives)} 条")
-print(f"当前 MAX_DISTANCE = {MAX_DISTANCE}\n")
+def load_questions(path: Path) -> list[str]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return [x if isinstance(x, str) else x["question"] for x in data]
+    return list(data["questions"])
 
 
-# ===== 计算 best_distance =====
-def best_distance(query: str) -> float:
-    """返回 top-1 的 L2 距离（越小越相关）"""
-    results = vectorstore.similarity_search_with_score(query, k=1)
-    return results[0][1] if results else float("inf")
-
-
-print("计算正样本距离...")
-pos_dists = [best_distance(q) for q in positives]
-
-print("计算负样本距离...")
-neg_dists = [best_distance(q) for q in negatives]
-
-
-# ===== 统计 =====
 def stats(name, dists):
-    dists_sorted = sorted(dists)
-    n = len(dists_sorted)
+    dists = sorted(dists)
+    n = len(dists)
     return {
         "name": name,
-        "min": dists_sorted[0],
-        "max": dists_sorted[-1],
-        "mean": sum(dists_sorted) / n,
-        "median": dists_sorted[n // 2],
+        "n": n,
+        "min": dists[0] if dists else None,
+        "median": dists[n // 2] if dists else None,
+        "mean": sum(dists) / n if n else None,
+        "max": dists[-1] if dists else None,
     }
 
-pos_stats = stats("正样本", pos_dists)
-neg_stats = stats("负样本", neg_dists)
 
-print("\n" + "=" * 70)
-print("距离分布统计")
-print("=" * 70)
-print(f"{'类别':<10} {'min':>8} {'median':>8} {'mean':>8} {'max':>8}")
-print("-" * 70)
-for s in [pos_stats, neg_stats]:
-    print(f"{s['name']:<10} {s['min']:>8.3f} {s['median']:>8.3f} {s['mean']:>8.3f} {s['max']:>8.3f}")
-
-# 分离度：正样本 max 和负样本 min 之间的差距
-print(f"\n正样本 max = {pos_stats['max']:.3f}")
-print(f"负样本 min = {neg_stats['min']:.3f}")
-gap = neg_stats["min"] - pos_stats["max"]
-if gap > 0:
-    print(f"完全分离，间隔 = {gap:.3f}")
-    print(f"任何落在 ({pos_stats['max']:.3f}, {neg_stats['min']:.3f}) 区间的阈值都是最优的")
-else:
-    print(f"有重叠，重叠区 = [{-gap:.3f}]（正样本有超出负样本 min 的，需权衡）")
-
-
-# ===== 扫阈值 =====
-def evaluate_threshold(thr):
-    tp = sum(1 for d in pos_dists if d <= thr)   # 正样本被接受
-    fn = len(pos_dists) - tp                     # 正样本被拒绝（漏答）
-    fp = sum(1 for d in neg_dists if d <= thr)   # 负样本被接受（幻觉）
-    tn = len(neg_dists) - fp                     # 负样本被拒绝
-
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 1.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    return precision, recall, f1, tp, fp, fn, tn
+def threshold_metrics(threshold, pos_dists, neg_groups):
+    tp = sum(1 for d in pos_dists if d <= threshold)
+    fn = len(pos_dists) - tp
+    fp = sum(1 for group in neg_groups.values() for d in group if d <= threshold)
+    tn = sum(1 for group in neg_groups.values() for d in group if d > threshold)
+    precision = tp / (tp + fp) if (tp + fp) else 1.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    fpr_by_group = {
+        name: (sum(1 for d in group if d <= threshold) / len(group) if group else 0.0)
+        for name, group in neg_groups.items()
+    }
+    fpr = fp / (fp + tn) if (fp + tn) else 0.0
+    fdr = fp / (tp + fp) if (tp + fp) else 0.0
+    return {
+        "threshold": threshold,
+        "tp": tp,
+        "fn": fn,
+        "fp": fp,
+        "tn": tn,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "negative_fpr": fpr,
+        "negative_fdr": fdr,
+        "fpr_by_group": fpr_by_group,
+    }
 
 
-thresholds = [round(0.50 + i * 0.01, 2) for i in range(101)]  # 0.50 ~ 1.50
-results = [(t, *evaluate_threshold(t)) for t in thresholds]
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--positives", default="eval/test_set_v3_gold.json")
+    parser.add_argument(
+        "--negatives",
+        nargs="+",
+        default=["eval/negatives.json", "eval/negatives_hard.json"],
+    )
+    parser.add_argument("--sample", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output", default="eval/output/calibration_v3.json")
+    args = parser.parse_args()
 
-# 找 F1 最大
-best_f1 = max(results, key=lambda r: r[3])
-# 找 Precision >= 0.95 且召回最高的
-valid = [r for r in results if r[1] >= 0.95]
-best_p95 = max(valid, key=lambda r: r[2]) if valid else None
+    print("加载 embedding 和 FAISS 索引...")
+    embedding = LocalEmbeddings(DEFAULT_MODEL)
+    vectorstore = load_vectorstore(embedding=embedding)
 
-print("\n" + "=" * 70)
-print("推荐阈值")
-print("=" * 70)
-print(f"当前阈值 = {MAX_DISTANCE}")
-print(f"  Precision = {evaluate_threshold(MAX_DISTANCE)[0]:.3f}")
-print(f"  Recall    = {evaluate_threshold(MAX_DISTANCE)[1]:.3f}")
-print(f"  F1        = {evaluate_threshold(MAX_DISTANCE)[2]:.3f}")
+    positives_all = load_questions(Path(args.positives))
+    rng = random.Random(args.seed)
+    positives = rng.sample(positives_all, min(args.sample, len(positives_all)))
 
-t, p, r, f1, tp, fp, fn, tn = best_f1
-print(f"\nF1 最大点 = {t:.2f}")
-print(f"  Precision = {p:.3f}")
-print(f"  Recall    = {r:.3f}")
-print(f"  F1        = {f1:.3f}")
-print(f"  正样本被接受 = {tp}/{len(pos_dists)}，负样本被误接受 = {fp}/{len(neg_dists)}")
+    neg_groups = {}
+    for path_str in args.negatives:
+        path = Path(path_str)
+        name = path.stem
+        neg_groups[name] = load_questions(path)
 
-if best_p95:
-    t, p, r, f1, tp, fp, fn, tn = best_p95
-    print(f"\nPrecision >= 0.95 的最高召回点 = {t:.2f}")
-    print(f"  Precision = {p:.3f}")
-    print(f"  Recall    = {r:.3f}")
-    print(f"  F1        = {f1:.3f}")
+    print(f"正样本：{len(positives)} 条（从 {len(positives_all)} 条抽样）")
+    for name, questions in neg_groups.items():
+        print(f"负样本[{name}]：{len(questions)} 条")
+    print(f"当前 MAX_DISTANCE = {MAX_DISTANCE}\n")
+
+    def best_distance(query: str) -> float:
+        results = vectorstore.similarity_search_with_score(query, k=1)
+        # FAISS returns numpy.float32; normalize for JSON/stats.
+        return float(results[0][1]) if results else float("inf")
+
+    print("计算正样本距离...")
+    pos_dists = [best_distance(q) for q in positives]
+    neg_dists = {}
+    for name, questions in neg_groups.items():
+        print(f"计算负样本距离[{name}]...")
+        neg_dists[name] = [best_distance(q) for q in questions]
+
+    print("\n" + "=" * 78)
+    print("距离分布统计")
+    print("=" * 78)
+    print(f"{'类别':<24} {'n':>4} {'min':>8} {'median':>8} {'mean':>8} {'max':>8}")
+    print("-" * 78)
+    for s in [stats("positive", pos_dists)] + [stats(k, v) for k, v in neg_dists.items()]:
+        print(
+            f"{s['name']:<24} {s['n']:>4} {s['min']:>8.3f} {s['median']:>8.3f} "
+            f"{s['mean']:>8.3f} {s['max']:>8.3f}"
+        )
+
+    thresholds = [round(0.50 + i * 0.01, 2) for i in range(101)]
+    results = [threshold_metrics(t, pos_dists, neg_dists) for t in thresholds]
+    best_f1 = max(results, key=lambda r: r["f1"])
+    current = threshold_metrics(MAX_DISTANCE, pos_dists, neg_dists)
+
+    print("\n" + "=" * 78)
+    print("指标（FPR/FDR 不是端到端幻觉率）")
+    print("=" * 78)
+    for label, m in [("当前阈值", current), ("F1 最大点", best_f1)]:
+        print(f"\n{label} = {m['threshold']:.2f}")
+        print(f"  Precision = {m['precision']:.3f}  Recall = {m['recall']:.3f}  F1 = {m['f1']:.3f}")
+        print(f"  TP={m['tp']} FN={m['fn']} FP={m['fp']} TN={m['tn']}")
+        print(f"  negative FPR = {m['negative_fpr']:.3f}  ({m['fp']}/{m['fp'] + m['tn']})")
+        print(f"  negative FDR among accepted = {m['negative_fdr']:.3f}")
+        for name, value in m["fpr_by_group"].items():
+            print(f"    FPR[{name}] = {value:.3f}")
+
+    out = {
+        "config": {
+            "positives": args.positives,
+            "negatives": args.negatives,
+            "sample": len(positives),
+            "seed": args.seed,
+            "max_distance": MAX_DISTANCE,
+        },
+        "distributions": {
+            "positive": pos_dists,
+            **{name: values for name, values in neg_dists.items()},
+        },
+        "current": current,
+        "best_f1": best_f1,
+        "sweep": results,
+    }
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n结果已保存：{out_path}")
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+        plt.rcParams["axes.unicode_minus"] = False
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        bins = [round(0.4 + i * 0.05, 2) for i in range(25)]
+        ax.hist(pos_dists, bins=bins, alpha=0.6, label=f"positive (n={len(pos_dists)})")
+        for name, values in neg_dists.items():
+            ax.hist(values, bins=bins, alpha=0.6, label=f"{name} (n={len(values)})")
+        ax.axvline(MAX_DISTANCE, color="black", linestyle="--", linewidth=2,
+                   label=f"MAX_DISTANCE={MAX_DISTANCE}")
+        ax.set_xlabel("best_distance (L2, lower is more relevant)")
+        ax.set_ylabel("count")
+        ax.set_title("positive vs negative best_distance")
+        ax.legend()
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+        fig.savefig(out_path.parent / "distance_distribution.png", dpi=150)
+        plt.close()
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot([r["threshold"] for r in results], [r["precision"] for r in results], label="precision")
+        ax.plot([r["threshold"] for r in results], [r["recall"] for r in results], label="recall")
+        ax.plot([r["threshold"] for r in results], [r["f1"] for r in results], label="f1", linestyle="--")
+        ax.axvline(MAX_DISTANCE, color="black", linestyle=":", label=f"current {MAX_DISTANCE}")
+        ax.set_xlabel("threshold")
+        ax.set_ylabel("metric")
+        ax.set_ylim(0, 1.05)
+        ax.legend()
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+        fig.savefig(out_path.parent / "pr_curve.png", dpi=150)
+        plt.close()
+        print(f"图已保存：{out_path.parent / 'distance_distribution.png'} / pr_curve.png")
+    except ImportError:
+        print("matplotlib 未安装，跳过画图")
+
+    return 0
 
 
-# ===== 画图（如果 matplotlib 装了）=====
-try:
-    import matplotlib
-    matplotlib.use("Agg")  # 无 GUI
-    import matplotlib.pyplot as plt
-
-    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
-    plt.rcParams["axes.unicode_minus"] = False
-
-    # --- 图 1：距离分布直方图 ---
-    fig, ax = plt.subplots(figsize=(10, 5))
-    bins = [round(0.4 + i * 0.05, 2) for i in range(25)]  # 0.4 ~ 1.6
-    ax.hist(pos_dists, bins=bins, alpha=0.6, label=f"正样本 (n={len(pos_dists)})", color="#2E86DE")
-    ax.hist(neg_dists, bins=bins, alpha=0.6, label=f"负样本 (n={len(neg_dists)})", color="#EE5A52")
-    ax.axvline(MAX_DISTANCE, color="black", linestyle="--", linewidth=2,
-               label=f"当前 MAX_DISTANCE={MAX_DISTANCE}")
-    if best_f1[0] != MAX_DISTANCE:
-        ax.axvline(best_f1[0], color="green", linestyle=":", linewidth=2,
-                   label=f"F1 最大 ={best_f1[0]:.2f}")
-    ax.set_xlabel("best_distance (L2 距离，越小越相关)")
-    ax.set_ylabel("样本数")
-    ax.set_title("正负样本的 best_distance 分布")
-    ax.legend()
-    ax.grid(alpha=0.3)
-    plt.tight_layout()
-    fig.savefig(OUTPUT_DIR / "distance_distribution.png", dpi=150)
-    print(f"\n图 1 已保存：{OUTPUT_DIR / 'distance_distribution.png'}")
-    plt.close()
-
-    # --- 图 2：PR 曲线 ---
-    fig, ax1 = plt.subplots(figsize=(10, 5))
-    ts = [r[0] for r in results]
-    ps = [r[1] for r in results]
-    rs = [r[2] for r in results]
-    fs = [r[3] for r in results]
-    ax1.plot(ts, ps, label="Precision", color="#2E86DE", linewidth=2)
-    ax1.plot(ts, rs, label="Recall", color="#EE5A52", linewidth=2)
-    ax1.plot(ts, fs, label="F1", color="green", linewidth=2, linestyle="--")
-    ax1.axvline(MAX_DISTANCE, color="black", linestyle=":", alpha=0.7,
-                label=f"当前阈值 {MAX_DISTANCE}")
-    if best_f1[0] != MAX_DISTANCE:
-        ax1.axvline(best_f1[0], color="orange", linestyle=":", alpha=0.7,
-                    label=f"F1 最大 ={best_f1[0]:.2f}")
-    ax1.set_xlabel("MAX_DISTANCE 阈值")
-    ax1.set_ylabel("指标值")
-    ax1.set_title("阈值扫描：Precision / Recall / F1")
-    ax1.legend(loc="lower left")
-    ax1.grid(alpha=0.3)
-    ax1.set_ylim(0, 1.05)
-    plt.tight_layout()
-    fig.savefig(OUTPUT_DIR / "pr_curve.png", dpi=150)
-    print(f"图 2 已保存：{OUTPUT_DIR / 'pr_curve.png'}")
-    plt.close()
-
-except ImportError:
-    print("\n[提示] matplotlib 未安装，跳过画图")
-    print("       如需生成图表：pip install matplotlib")
+if __name__ == "__main__":
+    raise SystemExit(main())

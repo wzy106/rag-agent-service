@@ -12,19 +12,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 # ===== 从公共模块导入（import 时会自动设置 HF_HOME + HF_HUB_OFFLINE）=====
 from rag_core.search import (
     LocalEmbeddings,
-    load_vectorstore,
     build_bm25,
-    hybrid_search,
     hybrid_search_with_rerank,
     DEFAULT_MODEL,
     DEFAULT_INDEX_DIR,
 )
+from rag_core.ingestion import ensure_index
 
 import anyio
 from fastmcp import FastMCP
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
 
 print(f"[RAG Server] HF_HOME={os.environ.get('HF_HOME')}", file=sys.stderr)
 
@@ -34,32 +30,9 @@ embedding = LocalEmbeddings(DEFAULT_MODEL)
 
 
 # ===== 加载或构建 FAISS 索引 =====
-if DEFAULT_INDEX_DIR.exists():
-    vectorstore = load_vectorstore(DEFAULT_INDEX_DIR, embedding)
-    print("[RAG Server] 从磁盘加载索引", file=sys.stderr)
-else:
-    docs_dir = _PROJECT_ROOT / "docs"
-    documents = []
-    # rglob 递归扫描所有子目录（docs/langchain/, docs/notes/, docs/readme/, docs/stories/）
-    for md_file in docs_dir.rglob("*.md"):
-        text = md_file.read_text(encoding="utf-8")
-        # 用相对路径作为 source，避免不同子目录同名文件冲突
-        # 例如 "langchain/01_一tool_装饰器.md"、"stories/22_故事_21Docker_构建报.md"
-        rel_path = md_file.relative_to(docs_dir).as_posix()
-        documents.append(Document(page_content=text, metadata={"source": rel_path}))
-    print(f"[RAG Server] 扫描到 {len(documents)} 个 markdown 文件", file=sys.stderr)
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300,
-        chunk_overlap=50,
-        separators=["\n\n", "\n", "。", "！", "？", " ", ""],
-    )
-    chunks = splitter.split_documents(documents)
-    print(f"[RAG Server] 首次构建索引，{len(chunks)} 块", file=sys.stderr)
-
-    vectorstore = FAISS.from_documents(chunks, embedding)
-    vectorstore.save_local(str(DEFAULT_INDEX_DIR))
-    print(f"[RAG Server] 索引已保存到 {DEFAULT_INDEX_DIR}", file=sys.stderr)
+docs_dir = _PROJECT_ROOT / "docs"
+vectorstore = ensure_index(DEFAULT_INDEX_DIR, docs_dir, embedding)
+print(f"[RAG Server] 索引就绪（{len(vectorstore.docstore._dict)} chunk）", file=sys.stderr)
 
 
 # ===== 构建 BM25 索引 =====

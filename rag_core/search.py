@@ -31,7 +31,8 @@ import jieba
 from rank_bm25 import BM25Okapi
 from langchain_core.embeddings import Embeddings
 from langchain_community.vectorstores import FAISS
-from sentence_transformers import SentenceTransformer
+
+from rag_core.chunking import derive_chunk_id, normalize_content
 
 
 # 向量 L2 距离阈值，超过认为不相关（bge 归一化后范围 0~2）
@@ -63,6 +64,13 @@ ENABLE_RERANK = os.getenv("RAG_ENABLE_RERANK", "1").lower() not in ("0", "false"
 
 class LocalEmbeddings(Embeddings):
     def __init__(self, model_name: str = DEFAULT_MODEL):
+        # 懒加载：让 rag_core.search 在没装 torch 的环境里也能被导入（单测/CI）。
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "sentence-transformers 需要 torch；请先安装 CPU 版 torch"
+            ) from exc
         # 让 HF 自己根据 HF_HOME 解析缓存路径
         self.model = SentenceTransformer(model_name)
 
@@ -86,6 +94,11 @@ def load_vectorstore(index_dir=None, embedding=None):
     )
 
 
+def doc_key(doc) -> str:
+    """Stable identity for RRF maps. Never use page_content as the key."""
+    return derive_chunk_id(doc)
+
+
 def build_bm25(vectorstore):
     """从 vectorstore 里取出所有 chunk，构建 BM25 索引。"""
     all_docs = list(vectorstore.docstore._dict.values())
@@ -105,6 +118,7 @@ def hybrid_search(
     bm25_weight: float = 0.3,
     max_distance: float = MAX_DISTANCE,
     verbose: bool = False,
+    dedupe_content: bool = True,
 ):
     """
     混合检索：向量 + BM25 + 加权 RRF，含距离阈值降级。
@@ -117,7 +131,9 @@ def hybrid_search(
     if not vector_results_with_scores:
         return []
 
-    # 降级判断：最佳向量距离太大 → 认为知识库中无相关内容
+    # 降级判断：最佳向量距离太大 → 认为知识库中无相关内容。
+    # 已知限制：这是 top-1 单点判断，且发生在 BM25/RRF 之前；关键词强相关
+    # 但向量距离大的 query 会被提前拒绝。本轮保持行为不变，仅在评估里量化。
     best_distance = vector_results_with_scores[0][1]
     if verbose:
         print(f"[RAG] 最佳向量距离: {best_distance:.4f}", file=sys.stderr)
@@ -129,7 +145,7 @@ def hybrid_search(
 
     # 拆出文档
     vector_results = [doc for doc, _ in vector_results_with_scores]
-    vector_ranks = {doc.page_content: i for i, doc in enumerate(vector_results)}
+    vector_ranks = {doc_key(doc): i for i, doc in enumerate(vector_results)}
 
     # BM25 检索
     tokenized_query = list(jieba.cut(query))
@@ -139,22 +155,42 @@ def hybrid_search(
         key=lambda i: bm25_scores[i],
         reverse=True,
     )[: k * 3]
-    bm25_ranks = {all_docs[i].page_content: rank for rank, i in enumerate(bm25_top_indices)}
+    bm25_ranks = {doc_key(all_docs[i]): rank for rank, i in enumerate(bm25_top_indices)}
 
-    # 加权 RRF 合并
-    all_contents = set(vector_ranks.keys()) | set(bm25_ranks.keys())
+    # 加权 RRF 合并（用稳定 chunk_id 做 key，避免相同内容跨文档互相覆盖）
+    all_keys = set(vector_ranks.keys()) | set(bm25_ranks.keys())
     rrf_scores = {}
-    for content in all_contents:
+    for key in all_keys:
         score = 0.0
-        if content in vector_ranks:
-            score += vector_weight / (rrf_k + vector_ranks[content])
-        if content in bm25_ranks:
-            score += bm25_weight / (rrf_k + bm25_ranks[content])
-        rrf_scores[content] = score
+        if key in vector_ranks:
+            score += vector_weight / (rrf_k + vector_ranks[key])
+        if key in bm25_ranks:
+            score += bm25_weight / (rrf_k + bm25_ranks[key])
+        rrf_scores[key] = score
 
-    top_contents = sorted(rrf_scores.keys(), key=lambda c: rrf_scores[c], reverse=True)[:k]
-    content_to_doc = {doc.page_content: doc for doc in all_docs}
-    return [content_to_doc[c] for c in top_contents]
+    ranked_keys = sorted(rrf_scores.keys(), key=lambda key: rrf_scores[key], reverse=True)
+    key_to_doc = {doc_key(doc): doc for doc in all_docs}
+    for doc in vector_results:
+        key_to_doc.setdefault(doc_key(doc), doc)
+
+    if not dedupe_content:
+        return [key_to_doc[key] for key in ranked_keys[:k] if key in key_to_doc]
+
+    # 相同内容只保留 RRF 排名最高的副本，继续向后取满 k 条。
+    out = []
+    seen = set()
+    for key in ranked_keys:
+        doc = key_to_doc.get(key)
+        if doc is None:
+            continue
+        fingerprint = normalize_content(doc.page_content)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        out.append(doc)
+        if len(out) == k:
+            break
+    return out
 
 
 def diverse_by_source(query, vectorstore, k: int = 3):

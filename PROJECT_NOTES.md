@@ -2,11 +2,24 @@
 
 > 用途：面试前自用，把项目讲清楚、把问题想明白。
 > 面试话术见 `LESSONS_LEARNED.md`
-> 最后更新：2026-10-16（修复 MCP 会话与精排性能；修复 `/history` 越权、加多租户隔离；加测试与 CI；订正此前未实测的延迟数字；语料 98 篇 / 583 chunk；MAX_DISTANCE 0.96；随机基线 3.0%）
+> 最后更新：2026-10-17（评估升级：v3 267 条 evidence chunk + 多金标；617 chunk；source/chunk 双粒度；端到端 LLM-as-judge；阈值改 FPR/FDR）
+
+## 2026-10-17 最新评估口径（先看这里）
+
+- **索引**：98 篇 / 617 chunk，全部带 `chunk_id` + `section_path`；`scripts/build_index.py --check` 通过。
+- **测试集**：v3 267 条（覆盖 89 篇），24 条多 evidence；`label_gold.py` 在 0.8 阈值下发现 11/267（4.1%）样本在别的 source 有近重复可答块。
+- **检索（Rerank）**：source strict 69.3% / source relaxed 70.0% / chunk any 59.9% / chunk all 53.9% / candidate@20 77.9%。
+- **source 比 chunk 高 9.4 个点**：只报 source 会高估。
+- **Rerank vs Hybrid**：chunk any +8.6%（95% CI +3.4~+14.2，p=0.004）；source strict +4.9%（95% CI -0.4~+10.1，p=0.084，**不显著**）。
+- **随机基线**：source strict 3.3% / chunk any 0.6%。
+- **阈值**：0.96 下 easy FPR 4%（1/25）、hard FPR 95%（19/20）、combined 44.4%；0.96 不能替代充分性判断。
+- **端到端**：80 正 + 20 负；66 作答、14 有效拒答；faithfulness 100%（66/66，CI 94.5~100%），relevance 98.5%（65/66，CI 91.9~99.7%），负样本拒答 100%（20/20，CI 83.9~100%）。
+- **2×2**：retrieval_hit=True/faithful=37，retrieval_hit=False/faithful=29，无 unfaithful。说明在这个自建语料上生成层几乎不编造，**瓶颈在检索**；但 faithfulness ≠ correctness，29 条可能是近重复命中或只对上下文忠实。
+- 本文件下方部分历史段落仍保留旧数字（57.0% / 60.6% / 249 条 / 583 chunk / “高估 8~14 点” / “幻觉率 1%”），仅作迭代记录；当前数字以根目录 README 和 `eval/output/*.json` 为准，遇到冲突以文首这一节为准。
 
 ## 一、项目简介（30 秒版本）
 
-基于 LangGraph + MCP + RAG 的 Agent 服务，用 FastAPI 提供 HTTP 接口，支持 SSE 流式输出，API Key 多租户鉴权，Redis 限流，Docker 容器化部署。检索用"混合检索 + Rerank"两阶段 pipeline，并配一套可复现的评估体系（98 篇文档 / 583 chunk，249 条测试集 + 随机基线 3.0%）。
+基于 LangGraph + MCP + RAG 的 Agent 服务，用 FastAPI 提供 HTTP 接口，支持 SSE 流式输出，API Key 多租户鉴权，Redis 限流，Docker 容器化部署。检索用"混合检索 + Rerank"两阶段 pipeline，并配一套可复现的评估体系（98 篇文档 / 617 chunk，v3 267 条测试集带 evidence chunk + 多金标 + 端到端评估）。
 
 ## 二、架构图
 
@@ -53,7 +66,7 @@ FastAPI（api_agent.py）
 客户端
 
 知识库：
-- 98 篇 markdown 文档 / 583 chunk
+- 98 篇 markdown 文档 / 617 chunk
 - 分 5 个子目录：langchain / notes / notes_interview / readme / stories
 - 子目录文件数：langchain 12、notes 15、notes_interview 25、readme 13、stories 33
 
@@ -101,7 +114,7 @@ FastAPI（api_agent.py）
 - **持久化记忆**：LangGraph checkpointer + AsyncSqliteSaver，重启/容器重建都不丢
 - **API Key 鉴权**：`/chat`、`/chat/stream`、`/history` 需要 Bearer token；`Header` + `Depends` 依赖注入；多 key 按租户隔离数据
 - **Redis 限流**：按 API Key 限流，20 次/分钟（`incr + expire` 固定窗口，fail-open）
-- RAG 检索增强（本地 embedding + FAISS 向量库，98 篇 / 583 chunk）
+- RAG 检索增强（本地 embedding + FAISS 向量库，98 篇 / 617 chunk）
 - **两阶段检索**：混合检索召回 Top-20 → Rerank 精排 Top-3
 - 混合检索（向量 + BM25 + 加权 RRF）
 - **Rerank 精排**（bge-reranker-base，召回率 +4.4%）
@@ -140,7 +153,7 @@ for md_file in docs_dir.rglob("*.md"):
 
 - 加载 `docs/` 下**所有子目录**的 Markdown 文件（用 `rglob` 递归）
 - **`source` 用相对路径**（如 `notes_interview/q01_xxx.md`），避免不同子目录同名文件冲突
-- 当前知识库：98 篇 markdown，切成 583 块
+- 当前知识库：98 篇 markdown，切成 617 块
 
 ### 2. 文档切分
 
@@ -190,7 +203,7 @@ else:
 
 - 首次启动：构建索引并保存到磁盘（`index.faiss` + `index.pkl`）
 - 后续启动：直接从磁盘加载，避免重复 embedding
-- 索引文件提交进 Git（583 chunk 约 1~2 MB）
+- 索引文件提交进 Git（617 chunk 约 1~2 MB）
 
 ### 5. 检索策略
 
@@ -628,7 +641,7 @@ result = await agent.ainvoke(
 | 多样性 | 平均（Top-K 里不同文档数） | 结果覆盖多少不同来源 |
 | 随机基线 | 1 - C(N-n,k)/C(N,k) | 从 N 个 chunk 里随机抽 k 个，命中期望 source 的概率 |
 
-**实测数据**（249 个测试项，覆盖 83 篇文档）：
+**实测数据（v2 历史口径；v3 见文首/README）**（249 个测试项，覆盖 83 篇文档）：
 
 | 策略 | 召回率 | 精确率 | MRR | 多样性 |
 |---|---|---|---|---|
@@ -1052,7 +1065,8 @@ docker exec -it agent-redis redis-cli ttl "rate:wzyyqw106"
 
 ## 八、项目数据（面试时能报的具体数字）
 
-- 工具数量：1 个（search_knowledge）
+> 评估数字以根目录 README 和 `eval/output/*.json` 为准；本节保留汇总快照。切分块数以当前索引为准（617）。
+> 工具数量：1 个（search_knowledge）
 - **知识库文档数：98 篇 markdown（5 个子目录）**
 - **切分后块数：583 块**
 - Embedding 模型：BAAI/bge-small-zh-v1.5（512 维，双塔，192 MB）
@@ -1634,6 +1648,8 @@ for /L %i in (1,1,21) do @curl.exe ... -w "%i : %{http_code}\n" ...
 | 为什么要 Rerank？ | 双塔召回粗，交叉编码器精排 |
 
 ## 十三、RAG 评估（面试重点）
+
+> 本节保留 v2 历史口径（source 级、249 条）。v3 已升级为 evidence chunk + 多金标 + source/chunk 双粒度 + 端到端 judge；当前数字见文首和 README。
 
 ### 评估方法
 

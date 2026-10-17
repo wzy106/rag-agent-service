@@ -1,6 +1,6 @@
 # RAG Agent 服务
 
-基于 LangChain + LangGraph + MCP + RAG 的 Agent 服务，支持 SSE 流式输出、多轮记忆持久化、API Key 多租户鉴权、Redis 限流、Docker 部署，并自带一套可复现的检索评估体系（249 条测试集 + 随机基线）。
+基于 LangChain + LangGraph + MCP + RAG 的 Agent 服务，支持 SSE 流式输出、多轮记忆持久化、API Key 多租户鉴权、Redis 限流、Docker 部署，并自带一套可复现的评估体系（267 条 v3 测试集：evidence chunk + 多金标 + source/chunk 双粒度 + 端到端 LLM-as-judge）。
 
 ## 架构
 
@@ -23,7 +23,7 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
                             ↓
                     Rerank 精排 Top-3（bge-reranker-base, CrossEncoder）
                             ↓
-                    FAISS 向量库（98 篇文档 / 583 chunk）
+                    FAISS 向量库（98 篇文档 / 617 chunk）
                             ↓ 检索结果返回给 Agent
                         DeepSeek 生成回答
     ↓ SSE 流式返回
@@ -59,18 +59,19 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 - **RAG 检索增强**：本地 embedding（BAAI/bge-small-zh-v1.5）+ FAISS 持久化
 - **两阶段检索**：混合检索召回 Top-N（`RAG_RECALL_K`，默认 20）→ Rerank 精排 Top-3
 - **混合检索**：向量 + BM25 + 加权 RRF（向量 0.7 / BM25 0.3）
-- **Rerank 精排**：bge-reranker-base（CrossEncoder），召回率 +4.4%，MRR +0.05
+- **Rerank 精排**：bge-reranker-base（CrossEncoder）；效果按 candidate recall@20 / final recall@3 分阶段评估（见「RAG 评估」）
 - **公共检索模块**：`rag_core/search.py`，服务端和评估脚本共用同一份 `hybrid_search`
-- **降级策略**：向量距离阈值（标定为 0.96），检索不到就不调 LLM，避免幻觉
+- **降级策略**：向量距离阈值（0.96）；注意它只 gate 检索，不 gate 生成（见「已知不足」）
 - **MCP 工具解耦**：工具独立成 Server，跨进程 stdio 通信；**常驻 session**（`client.session()` + `load_mcp_tools`，子进程只拉起一次，模型不重复加载）
 - **检索可配置**：候选数 `RAG_RECALL_K`（默认 20）、精排截断 `RAG_RERANK_MAX_LENGTH`、精排开关 `RAG_ENABLE_RERANK`
 - **SSE 流式输出**：逐 token 返回，中间步骤过滤
 - **MySQL 展示层**：对话历史按「租户 + thread_id」持久化，`/history` 只能查到自己租户的记录
 - **Agent 护栏**：`recursion_limit=10` + `max_tokens=2000`，防止死循环和 Token 爆炸
 - **友好错误处理**：异常映射为可读提示，不泄漏 API key、路径等内部信息
-- **RAG 评估**：249 条测试项，5 种策略对比 + 随机基线（3.0%），一条命令可复现
-- **测试集自动生成**：脚本用 DeepSeek API 批量生成 249 条
-- **阈值标定**：正负样本距离分布 + PR 曲线，精确率 99.0%、召回率 100%
+- **RAG 评估**：267 条 v3 测试项（evidence chunk + 多金标），5 种策略对比 + candidate/final 分阶段指标 + 随机基线 + Wilson/bootstrap 置信区间
+- **测试集自动生成**：脚本用 DeepSeek API 批量生成带 evidence chunk 的问题
+- **阈值标定**：easy/hard 负样本距离分布 + PR 曲线，分别报告 FPR / FDR
+- **端到端评估**：LLM-as-judge 评 faithfulness / relevance / refusal，并输出「检索命中 × 回答忠实」2×2 交叉表
 - **Docker 部署**：多阶段构建，镜像 2.42 GB，一键启动
 
 ## 目录结构
@@ -86,12 +87,12 @@ MCP Client ──stdio──→ MCP Server（mcp_rag_server.py）
 | `docs/notes_interview/` | 面试题逐个拆分（25 篇） |
 | `docs/readme/` | README 按章节拆分（13 篇） |
 | `docs/stories/` | 踩坑故事（33 篇） |
-| `eval/` | RAG 评估脚本 + 测试集（249 条）+ 阈值标定 |
-| `eval/output/` | 标定产生的图（距离分布 + PR 曲线） |
-| `scripts/` | 工具脚本（拆分笔记、生成测试集） |
+| `eval/` | RAG 评估脚本 + v3 测试集 + 多金标 + 阈值标定 + 端到端评估 |
+| `eval/output/` | 检索/标定/端到端评估结果（JSON + 图） |
+| `scripts/` | 工具脚本（拆分笔记、生成测试集、多金标、建索引） |
 | `tests/` | pytest 测试（单元 + 集成） |
 | `.github/workflows/` | GitHub Actions CI |
-| `faiss_index/` | FAISS 索引（583 chunk，已提交进 Git） |
+| `faiss_index/` | FAISS 索引（617 chunk，已提交进 Git） |
 | `hf_cache/` | HuggingFace 模型缓存（embedding + reranker，volume 挂载） |
 | `data/` | checkpoints.db 持久化目录（volume 挂载，不提交） |
 
@@ -250,6 +251,10 @@ RATE_LIMIT_PER_MINUTE=20
 |---|---|---|
 | `DEEPSEEK_API_KEY` | — | DeepSeek API 密钥 |
 | `DEEPSEEK_BASE_URL` | — | DeepSeek API 地址 |
+| `ANSWER_MODEL` | `deepseek-chat` | 端到端评估的回答模型（可选） |
+| `JUDGE_MODEL` | `deepseek-chat` | LLM-as-judge 模型（可选，换模型可降低自评偏好） |
+| `JUDGE_API_KEY` | 复用 `DEEPSEEK_API_KEY` | judge 的 API key（可选） |
+| `JUDGE_BASE_URL` | 复用 `DEEPSEEK_BASE_URL` | judge 的 base URL（可选） |
 | `MYSQL_PASSWORD` | `root123` | MySQL 密码 |
 | `API_KEY` | `dev-key-change-me` | 接口鉴权用的 Bearer token（单租户） |
 | `API_KEYS` | — | 逗号分隔的多个 key，每个 key 一个独立租户；设置后优先于 `API_KEY` |
@@ -287,64 +292,129 @@ pytest                        # 全部
 | 层级 | 覆盖内容 | 需要模型 |
 |---|---|---|
 | 单元（`test_auth.py` / `test_api_units.py`） | 鉴权、租户隔离、`/history` 越权、`thread_id` 校验、错误映射、限流（含 fail-open） | 否 |
-| 集成（`test_search_integration.py`） | 索引加载、`hybrid_search` 返回数、距离阈值降级、精排开关 | 是 |
+| 单元（`test_chunking.py` / `test_eval_metrics.py` / `test_hybrid_search_units.py`） | chunk_id/section_path、重复内容不塌缩、召回/MRR/nDCG/CI | 否 |
+| 单元（`test_index_consistency.py`） | 提交的 FAISS 索引与 docs 重新切分后的 chunk_id 集合一致 | 否 |
+| 集成（`test_search_integration.py`） | 索引加载、元数据、`hybrid_search` 返回数、距离阈值降级、精排开关 | 是 |
 
 - 接口测试用**打桩**（假 Agent / 假 MySQL / 假 Redis），不依赖真实 LLM 或数据库
 - **CI**：`.github/workflows/ci.yml`，push / PR 时跑单元测试（集成测试需下载模型，CI 跳过）
+- `rag_core.search` 对 sentence-transformers 做懒加载，没装 torch 时也能导入跑纯函数测试
 - 测试用的 API key 固定为 `key_alice` / `key_bob`，不读真实 `.env`
 
 ## RAG 评估
 
-构建 **249 条测试项**（覆盖 83 篇文档），5 种策略对比：
+**267 条 v3 测试项**（覆盖 89 篇文档 / 617 chunk），5 种策略对比。数字来自 `eval/output/retrieval_v3.json`：
 
-| 策略 | 召回率 | 精确率 | MRR | 平均多样性 |
-|---|---|---|---|---|
-| 普通相似度 | 50.6% | 0.23 | 0.39 | 2.63 |
-| MMR | 37.8% | 0.15 | 0.33 | 2.79 |
-| MMR + 按来源去重 | 40.6% | 0.14 | 0.34 | **3.00** |
-| 混合检索（向量+BM25+RRF） | 52.6% | 0.24 | 0.42 | 2.57 |
-| **混合检索 + Rerank** | **57.0%** | **0.25** | **0.47** | 2.56 |
-| **随机基线** | **3.0%** | — | — | — |
+| 策略 | source strict | source relaxed | chunk any | chunk all | candidate@20 | precision | MRR | nDCG@3 | diversity |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 普通相似度 | 62.9% | 63.7% | 47.2% | 41.9% | n/a | 0.167 | 0.341 | 0.357 | 2.61 |
+| MMR | 50.2% | 50.9% | 30.3% | 24.3% | n/a | 0.101 | 0.265 | 0.253 | 2.84 |
+| MMR + 按来源去重 | 52.4% | 53.2% | 30.3% | 24.3% | n/a | 0.101 | 0.264 | 0.252 | **3.00** |
+| 混合检索（向量+BM25+RRF） | 64.4% | 65.9% | 51.3% | 46.4% | n/a | 0.181 | 0.389 | 0.404 | 2.57 |
+| **混合检索 + Rerank** | **69.3%** | **70.0%** | **59.9%** | **53.9%** | **77.9%** | **0.211** | **0.498** | **0.502** | 2.53 |
+| **随机基线** | **3.3%** | **3.8%** | **0.6%** | — | — | — | — | — | — |
 
 **关键发现**：
-- **随机基线 3.0%** → 判别空间扩大到 **54.0 个点**
-- **Rerank 增益显著**：召回率 +4.4%（52.6% → 57.0%），MRR +0.05
-- **混合检索优于纯相似度**：召回率 52.6% vs 50.6%（+2.0%）
-- **MMR 在"精确匹配"任务上吃亏**：召回率只有 37.8%（多样性导向，牺牲精度）
-- **多样性 trade-off 明显**：MMR+去重 3.00 vs 相似度 2.63
+- **source 级比 chunk 级高 9.4 个点**（Rerank：69.3% vs 59.9%）——只报 source 会高估真实能力。
+- **候选阶段比最终阶段高 18.0 个点**（candidate@20 77.9% vs final@3 59.9%）；Top-20 里有正确块，但精排 Top-3 只留下 59.9%，最终截断是主要瓶颈。
+- **Rerank vs 混合检索**：chunk any **+8.6%**（95% CI +3.4% ~ +14.2%，p=0.004）；source strict **+4.9%**（95% CI -0.4% ~ +10.1%，p=0.084，**不显著**）。同一个改动，不同粒度给出不同结论。
+- **混合检索优于纯相似度**：source 64.4% vs 62.9%（+1.5%），chunk 51.3% vs 47.2%（+4.1%）。
+- **MMR 在精确匹配任务上吃亏**：chunk any 30.3%，低于相似度 47.2%；但多样性更高（2.84）。
+- **多金标确实有影响**：source relaxed 比 strict 高 0.7–1.5 个点；v3 中 11/267（4.1%）的样本在别的 source 有 ≥0.8 的近重复可答块。
 
-> **可复现**：`python eval/eval_retrieval.py` 一条命令跑出上面所有数字。
+> **可复现**：
+> ```bash
+> python eval/eval_retrieval.py \
+>   --test-set eval/test_set_v3_gold.json --k 3 --bootstrap 2000 \
+>   --json eval/output/retrieval_v3.json
+> ```
+
+### 端到端评估（80 正 + 20 负）
+
+`eval/eval_e2e.py` 跑“检索 + 生成 + LLM-as-judge”，结果在 `eval/output/e2e_summary.json`：
+
+| 指标 | 值 | 95% CI |
+|---|---:|---|
+| 可回答问题 n | 80 | — |
+| 实际作答 | 66 | — |
+| 有效拒答（资料不足） | 14（17.5%） | — |
+| faithfulness（作答项） | **100.0%**（66/66） | 94.5% ~ 100% |
+| relevance（作答项） | **98.5%**（65/66） | 91.9% ~ 99.7% |
+| unsupported claim rate | 0.0%（0/66） | 0% ~ 5.5% |
+| 负样本拒答准确率 | **100.0%**（20/20） | 83.9% ~ 100% |
+
+**2×2 交叉表（检索命中 × 回答忠实）**：
+
+| | faithful=True | faithful=False |
+|---|---:|---:|
+| retrieval_hit=True | 37 | 0 |
+| retrieval_hit=False | 29 | 0 |
+
+**怎么读这组数**：
+- 在这个自建语料 + 自生成问题的设定里，生成层几乎不编造；**主要瓶颈是检索**：29/66 的回答是在检索未命中 gold 的情况下生成的，另外 14/80 因资料不足拒答。
+- `retrieval_hit=False, faithful=True` 不等于回答正确：可能是命中了近重复/等价 chunk，而 gold 标签没覆盖；也可能回答只对上下文忠实、但没解决用户问题。faithfulness ≠ correctness。
+- 100% 是上界，不是普适结论：judge 默认与回答模型同为 DeepSeek，存在自评偏好；需要换 judge 模型并人工抽查。当前只人工抽查了少量样本。
+- 端到端评估是直接 RAG 链路，不包含 MCP 工具选择、多轮改写和 Agent 循环。
+
+**延迟（本机 CPU）**：检索 P50 6.6s / P95 7.8s；生成 P50 0.9s；judge P50 0.9s。检索是主要延迟来源（Reranker）。
+
+> **可复现**：
+> ```bash
+> python eval/eval_e2e.py \
+>   --test-set eval/test_set_v3_gold.json \
+>   --negatives eval/negatives.json eval/negatives_hard.json \
+>   --answerable 80 --negative 20 --seed 42 --concurrency 3
+> ```
 
 ## 测试集自动生成
 
-`eval/test_set_v2.json` 里的 249 条测试项是通过脚本自动生成的：
+`eval/test_set_v3.json` 里的 267 条测试项由脚本自动生成，v2 保留用于历史对比：
 
 **流程**：
-1. 遍历所有 chunk，按 source 分组
+1. 遍历索引 chunk，按 source 分组
 2. 每篇文档挑 2 个最长 chunk
-3. 调 DeepSeek API 生成 3 个问题
-4. 标注 `expected_sources = 该文档的 source`
+3. 调 DeepSeek API 生成 3 个问题，并让模型标注 evidence（哪些 chunk 真正包含答案）
+4. 写入 `expected_sources` + `evidence_chunk_ids` + `evidence_coverage_mode`
+5. `scripts/label_gold.py` 用 3-gram Jaccard ≥ 0.8 扩展近重复块，生成 `gold_chunk_ids` / `gold_sources`
 
-**脚本**：`python scripts/generate_testset.py`
-**成本**：约 ¥0.2（98 篇 × 1 次 API 调用）
+**脚本**：
+
+```bash
+python scripts/generate_testset.py --output eval/test_set_v3.json
+python scripts/label_gold.py --test-set eval/test_set_v3.json
+```
+
+**成本**：约 ¥0.2–0.5（98 篇 × 1 次 API 调用）
 
 ## 阈值标定
 
-`MAX_DISTANCE` 降级阈值通过实验标定，不是拍脑袋定的。
+`MAX_DISTANCE` 降级阈值通过实验标定，不是拍脑袋定的。但它衡量的是**检索层是否接受 query**，不是端到端幻觉率。
 
-**当前语料（583 chunk）的标定结果**：
+**当前语料（617 chunk，100 正样本 + easy/hard 负样本）**：
 
-| 阈值 | Precision | Recall | F1 | 业务含义 |
-|---|---|---|---|---|
-| 1.00（旧值） | 0.967 | 0.967 | 0.967 | 漏答 3.3%，幻觉 3.3% |
-| **0.96（F1 最大）** | **0.990** | **1.000** | **0.995** | **漏答 0%，幻觉 1.0%** |
+| 负样本组 | n | FPR @ 0.96 | 说明 |
+|---|---:|---:|---|
+| easy（天气/菜谱/电影） | 25 | **4.0%**（1/25） | 明显离题 |
+| hard（版本号/新特性/价格） | 20 | **95.0%**（19/20） | 近域但库内没有 |
+| combined | 45 | **44.4%**（20/45） | — |
 
-**距离分布**：
-- 正样本：0.363 ~ 0.958（中位数 0.709）
-- 负样本：0.813 ~ 1.420（中位数 1.176）
-- 重叠区：0.813 ~ 0.958，宽 0.145
+在 100 正 + 45 负上：**Precision 0.833、Recall 1.000、F1 0.909**。
 
-**复现**：`python eval/calibrate_distance.py`
+F1 最大点是 **0.87**（Precision 0.884、Recall 0.990、F1 0.934），但 hard FPR 仍有 **60%**。这说明**单一距离阈值无法区分“近域但库内没有”的问题**；0.96 保留用于拦截明显离题 query，真正的拒答需要生成层的充分性判断或 graph 分支。
+
+**口径**：
+- `FPR = FP/(FP+TN)`：负样本被接受的比例
+- `FDR = FP/(TP+FP)`：被接受结果里负样本占的比例，依赖抽样基率
+- `1 - precision` 不是“幻觉率”；旧文档的“幻觉率 1%”说法已修正
+
+**复现**：
+
+```bash
+python eval/calibrate_distance.py \
+  --positives eval/test_set_v3_gold.json \
+  --negatives eval/negatives.json eval/negatives_hard.json \
+  --output eval/output/calibration_v3.json
+```
 
 ## 技术栈
 
@@ -375,7 +445,11 @@ pytest                        # 全部
 | 错误映射为友好提示 | `str(e)` 可能泄漏 API key、路径等 |
 | 混合检索加权 RRF | 等权 RRF 实测反而比纯向量差 |
 | 抽公共 `hybrid_search` 到 `rag_core/` | 服务端和评估脚本共用一份代码 |
-| `MAX_DISTANCE` 标定为 0.96 | 通过距离分布 + PR 曲线找 F1 最大点 |
+| `MAX_DISTANCE` 标定为 0.96 | 通过距离分布 + PR 曲线；只用于拦截明显离题 query，hard 负样本仍会通过 |
+| **chunk_id + section_path** | **稳定 ID 用 source + section + content hash，避免重复内容互相覆盖** |
+| **source/chunk 双粒度 + 多金标** | **source 任意块命中会高估，单金标会低估；近重复扩展为 gold_chunk_ids/gold_sources** |
+| **端到端 LLM-as-judge** | **检索命中不代表回答忠实；用 2×2 交叉表区分检索问题和生成问题** |
+| **评估脚本拆 `main()`** | **可被 pytest 导入，加纯函数单测和索引一致性测试** |
 | **API Key 鉴权** | **用 Depends 依赖注入，鉴权逻辑和业务逻辑解耦** |
 | **Redis 限流** | **按 API Key 限流，`incr + expire` 固定窗口，fail-open** |
 | **开发期 volume 挂载** | **改代码不用 rebuild，迭代秒级** |
@@ -384,13 +458,18 @@ pytest                        # 全部
 
 ## 已知不足
 
+- 语料是项目自述（98 篇笔记/面试题/踩坑故事），测试集也由这些 chunk 生成；v3 的 evidence chunk + 多金标只能修正“同一答案在别的文档”，不能消除“自己考自己”的外部效度问题。
+- source 级和 chunk 级要同时报告：source 任意块命中会高估，单金标会低估；两者都不能单独代表真实能力。
+- 阈值 `MAX_DISTANCE=0.96` 是检索层接受率，不是端到端幻觉率；实测 easy 负样本 FPR 4%、hard 负样本 FPR 95%。
+- 阈值只 gate 检索，不 gate 生成：检索为空时工具返回“没有找到”，Agent 仍可能继续生成；真正拒答需要 graph 分支。
+- 阈值只看向量 top-1，且在 BM25/RRF 之前判断；关键词强相关但向量距离大的 query 会被提前拒绝。
+- 端到端评估是直接 RAG 链路（检索 + 生成 + judge），不覆盖 MCP 工具选择、多轮改写和 Agent 循环。
+- LLM-as-judge 默认与回答模型同为 DeepSeek，存在自评偏好；可通过 `JUDGE_*` 环境变量换模型，并人工抽查校准。
 - pymysql 是**同步客户端**，在 async 路径上会阻塞事件循环（生产应换 `aiomysql`）
 - `save_conversation` 每次请求新建 MySQL 连接，无连接池
-- 评估是**文档级召回**而非 chunk 级——source 级指标高估了 8~14 个点
-- 语料里混着"面试题标准答案"，**存在语料同源问题**
-- 流式状态机用布尔变量表达，边界情况可能出错
-- **Rerank 单次精排 CPU 上约 2~7 秒**（20 候选，本机实测，负载高时可达 13 秒；旧文档写的 50~100 ms 从未实测，且与"249 条 4~8 分钟"自相矛盾）
-- **评估脚本不可测**：`eval/`、`scripts/` 在 import 时就执行（加载模型/跑评估），无法被 pytest 导入，要拆出 `main()` 才能纳入测试
+- 流式状态机用布尔变量表达，边界情况可能出错，且没有自动化测试覆盖
+- 依赖只有下界、没有 lockfile；干净环境复现仍需验证
+- **Rerank 单次精排 CPU 上约 2~7 秒**（20 候选，本机实测，负载高时可达十几秒）
 - **测试未覆盖 Agent 编排与流式**：`create_agent` 主流程和 SSE 状态机没有自动化测试
 
 ## 学习路径

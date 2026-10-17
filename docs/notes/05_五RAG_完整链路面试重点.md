@@ -14,7 +14,7 @@ for md_file in docs_dir.rglob("*.md"):
 
 - 加载 `docs/` 下**所有子目录**的 Markdown 文件（用 `rglob` 递归）
 - **`source` 用相对路径**（如 `notes_interview/q01_xxx.md`），避免不同子目录同名文件冲突
-- 当前知识库：98 篇 markdown，切成 583 块
+- 当前知识库：98 篇 markdown，切成约 600 块（精确值以索引为准）
 
 ### 2. 文档切分
 
@@ -64,7 +64,7 @@ else:
 
 - 首次启动：构建索引并保存到磁盘（`index.faiss` + `index.pkl`）
 - 后续启动：直接从磁盘加载，避免重复 embedding
-- 索引文件提交进 Git（583 chunk 约 1~2 MB）
+- 索引文件提交进 Git（约 600 chunk，约 1~2 MB）
 
 ### 5. 检索策略
 
@@ -76,7 +76,7 @@ else:
 results = vectorstore.similarity_search(query, k=3)
 ```
 
-最基础的余弦相似度检索。**在 249 条测试集上召回率 52.2%。**
+最基础的余弦相似度检索。**v3 测试集上 chunk any 48.7%（source strict 62.5%）。**
 
 #### 5.2 MMR 检索
 
@@ -90,7 +90,7 @@ results = vectorstore.max_marginal_relevance_search(query, k=3, fetch_k=10)
 - 同一文档里差异大的 chunk，MMR 也可能都选
 - 想保证“Top-3 来自不同文档”，需要额外按文档去重
 
-**在 249 条测试集上的表现**：召回率只有 **41.0%**——在“精确匹配”任务上吃亏，但多样性较高（2.79）。
+**v3 测试集上的表现**：chunk any 只有 **36.0%**（低于相似度 48.7%）——在“精确匹配”任务上吃亏，但多样性较高（2.79 vs 2.52）。
 
 #### 5.3 混合检索（加权 RRF）
 
@@ -153,7 +153,7 @@ RRF_score(doc) = Σ 权重 / (k + 排名)
 - 加权（0.7/0.3）：100% 召回率
 - **向量检索更可靠，给它更高权重**
 
-**在 249 条测试集上的表现**：混合检索召回率 **54.6%** > 纯相似度 52.2%（**+2.4%**）。
+**历史表现（v2 source 级口径）**：混合检索召回率 54.6% > 纯相似度 52.2%。v3 换成 source/chunk 双粒度 + 多金标后，具体数字见根目录 `README.md`。
 
 #### 5.4 Rerank 精排
 
@@ -195,19 +195,15 @@ def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
     return rerank(query, candidates, top_k=final_k)
 ```
 
-**效果**（249 条测试项，覆盖 83 篇文档）：
+**效果**：
 
-| 策略 | 召回率 | 精确率 | MRR | 多样性 |
-|---|---|---|---|---|
-| 混合检索 | 54.6% | 0.24 | 0.45 | 2.60 |
-| **混合检索 + Rerank** | **60.6%** | **0.27** | **0.49** | 2.60 |
-
-- 召回率 **+6.0%**，MRR **+0.04**
-- **Rerank 提升的主要是召回率**——混合检索直接返回 Top-3 会漏掉“相关但排名 4~20”的 chunk，Rerank 拿 Top-20 重新排，有机会把关键 chunk 顶上来
+- 当前评估同时看 candidate recall@20 和 final recall@3，以及 source/chunk 双粒度指标。
+- 具体数字见根目录 `README.md` 和 `eval/output/retrieval_v3.json`。
+- 定性结论：Rerank 主要提升 final 阶段召回，把 Top-20 里被埋没的相关 chunk 顶上来；如果 candidate recall 已经很高而 final 很低，瓶颈就在精排。
 
 **懒加载设计**：Reranker 模型约 1.1 GB（278M 参数），加载要数秒。用全局变量 `_reranker = None` 做单例，第一次调用 `rerank()` 时才加载，**不拖慢服务启动**（服务启动时另有预热把加载成本前移）。
 
-**性能问题**：Rerank 要逐对推理。249 条查询 × 20 候选 = 4980 次推理，CPU 上精排 20 候选约 2~7 秒（本机实测），249 条跑完约 10~30 分钟。高并发场景需要优化（更小模型 / GPU / ONNX 量化）。
+**性能问题**：Rerank 要逐对推理。267 条查询 × 20 候选 = 5340 次推理，CPU 上精排 20 候选约 2~7 秒（本机实测），267 条跑完约 10~30 分钟。高并发场景需要优化（更小模型 / GPU / ONNX 量化）。
 
 > **踩坑订正**：文档早先写的"单次 50~100 ms"**从未实测**，且与"249 条 4~8 分钟"（≈1~2 s/query）自相矛盾。
 
@@ -218,40 +214,37 @@ def hybrid_search_with_rerank(query, vectorstore, bm25, all_docs,
 **方案**：在检索层加距离阈值，超过就返回“没找到”。
 
 ```python
-# 通过 eval/calibrate_distance.py 标定（2026-10-12）：
-# Precision=0.990, Recall=1.000, F1=0.995
-# 相比旧阈值 1.0（P=0.967），精确率提升，负样本误入更少
+# 通过 eval/calibrate_distance.py 标定
 MAX_DISTANCE = 0.96
 ```
 
-**阈值标定实验（2026-10-12）**：
+**阈值标定实验**：
 
-- 正样本 100 条（来自 `test_set_v2.json`，seed=42）+ 负样本 25 条（`negatives.json`）
+- 正样本从测试集抽样；负样本分 easy（`negatives.json`）和 hard（`negatives_hard.json`）
 - 对每条问题算 `best_distance`（top-1 的 L2 距离）
-- 距离分布：
-  - 正样本：0.363 ~ 0.958（中位数 0.708）
-  - 负样本：0.813 ~ 1.420（中位数 1.176）
-  - **重叠区：[0.813, 0.958]**，宽 0.145
+- 扫 0.50~1.50 的阈值，画 PR 曲线
+- 分别报告 easy / hard / combined 的 FPR
 
-**候选阈值对比**：
+**口径修正**：
 
-| 阈值 | Precision | Recall | F1 | 业务含义 |
-|---|---|---|---|---|
-| 1.00（旧） | 0.967 | 0.967 | 0.967 | 旧标定 |
-| **0.96（最终）** | **0.990** | **1.000** | **0.995** | **幻觉率约 1.0%，漏答 0%** |
+- `FPR = FP/(FP+TN)`：负样本被接受的比例
+- `FDR = FP/(TP+FP)`：被接受结果里负样本占的比例，依赖抽样基率
+- 旧文档把 `1 - precision` 写成“幻觉率 1%”，这个说法不准确，已修正
+- 阈值衡量的是检索层接受率，**不是端到端幻觉率**
 
-**为什么选 0.96 而不是旧 1.00**：
-- 正样本距离上界是 0.958，取 0.96 可以全收正样本
-- 比 1.0 更紧，能减少负样本误入上下文
-- RAG 场景用户对“编造”的容忍度远低于“不知道”，优先保精确率
-- 新标定 P=0.990、R=1.000、F1=0.995，整体优于旧阈值
+**已知限制**：
+
+- 只看向量 top-1，且在 BM25/RRF 融合之前判断；BM25 能命中的关键词 query 可能被提前拒绝
+- 近域但库内没有的问题可能通过阈值，进入生成阶段
+- 真正的拒答需要在生成层做充分性判断或 graph 分支
 
 **产出**：
 - `eval/calibrate_distance.py`（标定脚本，可复现）
-- `eval/negatives.json`（25 条负样本）
-- `eval/output/distance_distribution.png`（距离分布图）
-- `eval/output/pr_curve.png`（PR 曲线）
+- `eval/negatives.json` / `eval/negatives_hard.json`
+- `eval/output/calibration_v3.json`
+- `eval/output/distance_distribution.png` / `pr_curve.png`
 
 **为什么用向量距离，不用 RRF 分数**：
 - RRF 分数范围窄（0.005~0.02），无法区分好坏
 - 向量 L2 距离直接反映语义相似度，范围 0~2，好判断
+- 但 top-1 单点判断仍然脆弱，后续应改成融合后 + 充分性判断

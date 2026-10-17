@@ -1,0 +1,2968 @@
+[
+  {
+    "question": "写工具函数时，为啥模型会搞不清它是干嘛的？",
+    "expected_sources": [
+      "langchain/01_一tool_装饰器.md"
+    ],
+    "evidence_chunk_ids": [
+      "91a7020b7e77664f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "那个 @tool 装饰器到底帮我们自动做了哪些事？",
+    "expected_sources": [
+      "langchain/01_一tool_装饰器.md"
+    ],
+    "evidence_chunk_ids": [
+      "237b9c6c1fd36eed"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "如果函数没写类型注解，对模型调用工具有什么影响？",
+    "expected_sources": [
+      "langchain/01_一tool_装饰器.md"
+    ],
+    "evidence_chunk_ids": [
+      "91a7020b7e77664f",
+      "237b9c6c1fd36eed"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "create_agent 里那个 checkpointer 参数是干嘛用的？",
+    "expected_sources": [
+      "langchain/02_二create_agent_的参数.md"
+    ],
+    "evidence_chunk_ids": [
+      "26487ca0a1bfa469"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "不传 checkpointer 的话智能体还会记得之前聊过什么吗？",
+    "expected_sources": [
+      "langchain/02_二create_agent_的参数.md"
+    ],
+    "evidence_chunk_ids": [
+      "26487ca0a1bfa469"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "能不能给个例子看看 checkpointer 和 system_prompt 具体怎么传？",
+    "expected_sources": [
+      "langchain/02_二create_agent_的参数.md"
+    ],
+    "evidence_chunk_ids": [
+      "5ea5ff6bb87a72ac"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "LangGraph 里那个 config 字典为啥要套两层结构啊？",
+    "expected_sources": [
+      "langchain/03_三config_和_thread_id.md"
+    ],
+    "evidence_chunk_ids": [
+      "cb7e84a24dfb7b45"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "thread_id 到底存在哪儿，怎么区分不同用户的会话？",
+    "expected_sources": [
+      "langchain/03_三config_和_thread_id.md"
+    ],
+    "evidence_chunk_ids": [
+      "cb7e84a24dfb7b45",
+      "c3af2aad1f0996ba"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "InMemorySaver 里面是按什么把消息分开存的？",
+    "expected_sources": [
+      "langchain/03_三config_和_thread_id.md"
+    ],
+    "evidence_chunk_ids": [
+      "c3af2aad1f0996ba"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "流式返回的每个 chunk 里，节点名和状态更新是怎么对应的？",
+    "expected_sources": [
+      "langchain/04_四stream_返回的_chunk_结构.md"
+    ],
+    "evidence_chunk_ids": [
+      "4e8f18751ace0754"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "遍历 chunk 取消息列表时，为什么要用带默认值的 get 写法？",
+    "expected_sources": [
+      "langchain/04_四stream_返回的_chunk_结构.md"
+    ],
+    "evidence_chunk_ids": [
+      "2478ac448904d9e5",
+      "4e8f18751ace0754"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "chunk 里 model 这个键下面装的是什么内容？",
+    "expected_sources": [
+      "langchain/04_四stream_返回的_chunk_结构.md"
+    ],
+    "evidence_chunk_ids": [
+      "2478ac448904d9e5"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "prompt、model 和 parser 用竖线连起来是什么意思？",
+    "expected_sources": [
+      "langchain/05_五prompt_model_parser_管道语法.md"
+    ],
+    "evidence_chunk_ids": [
+      "a2a54f596e3ca9e8"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个竖线管道在 Python 里是怎么实现的？",
+    "expected_sources": [
+      "langchain/05_五prompt_model_parser_管道语法.md"
+    ],
+    "evidence_chunk_ids": [
+      "4ba09cf869786e27",
+      "a2a54f596e3ca9e8"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "整条链跑起来后，数据在各步骤之间是怎么变化的？",
+    "expected_sources": [
+      "langchain/05_五prompt_model_parser_管道语法.md"
+    ],
+    "evidence_chunk_ids": [
+      "4ba09cf869786e27"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "DeepSeek 为什么不能像别的模型那样直接用结构化输出功能？",
+    "expected_sources": [
+      "langchain/06_六PydanticOutputParser_结构化输出.md"
+    ],
+    "evidence_chunk_ids": [
+      "3753b2e9396a3ba8"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么把输出格式的说明塞到系统提示词里让模型照着做？",
+    "expected_sources": [
+      "langchain/06_六PydanticOutputParser_结构化输出.md"
+    ],
+    "evidence_chunk_ids": [
+      "66486f0f32a853fa"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "整条链跑起来后，模型吐出来的 JSON 是在哪儿被转成对象的？",
+    "expected_sources": [
+      "langchain/06_六PydanticOutputParser_结构化输出.md"
+    ],
+    "evidence_chunk_ids": [
+      "3753b2e9396a3ba8",
+      "66486f0f32a853fa"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个内存保存器重启程序后数据还在吗？",
+    "expected_sources": [
+      "langchain/07_七InMemorySaver_记忆机制.md"
+    ],
+    "evidence_chunk_ids": [
+      "9bf509d83932680c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "开发时用的记忆组件上线后该换成什么？",
+    "expected_sources": [
+      "langchain/07_七InMemorySaver_记忆机制.md"
+    ],
+    "evidence_chunk_ids": [
+      "9bf509d83932680c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么让不同用户的对话互不串台？",
+    "expected_sources": [
+      "langchain/07_七InMemorySaver_记忆机制.md"
+    ],
+    "evidence_chunk_ids": [
+      "fe04454b601139ca"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么让智能体说话像个甜妹，而且回答别太长？",
+    "expected_sources": [
+      "langchain/08_八System_Prompt_人设控制.md"
+    ],
+    "evidence_chunk_ids": [
+      "4e4dde07352ee3b4"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "那个控制模型说话风格的东西到底起什么作用？",
+    "expected_sources": [
+      "langchain/08_八System_Prompt_人设控制.md"
+    ],
+    "evidence_chunk_ids": [
+      "3563f978550bea10"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "我设了人设但模型有时候不照着来，有什么办法管住它？",
+    "expected_sources": [
+      "langchain/08_八System_Prompt_人设控制.md"
+    ],
+    "evidence_chunk_ids": [
+      "3563f978550bea10"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "模型要调用工具的时候，返回的消息里content字段是什么样的？",
+    "expected_sources": [
+      "langchain/09_九tool_calls_属性.md"
+    ],
+    "evidence_chunk_ids": [
+      "c15a861ea680f003"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "工具调用信息里的tc具体包含哪些字段？",
+    "expected_sources": [
+      "langchain/09_九tool_calls_属性.md"
+    ],
+    "evidence_chunk_ids": [
+      "93c6cdc6db8d181c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么判断一条消息里有没有工具调用，并把它打印出来？",
+    "expected_sources": [
+      "langchain/09_九tool_calls_属性.md"
+    ],
+    "evidence_chunk_ids": [
+      "c15a861ea680f003"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "DeepSeek 不支持 json_schema 的话，我该换成什么解析器？",
+    "expected_sources": [
+      "langchain/11_十一常见错误对照表.md"
+    ],
+    "evidence_chunk_ids": [
+      "f5f4498e5f8443b2"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么我写的工具函数模型一直不调用？",
+    "expected_sources": [
+      "langchain/11_十一常见错误对照表.md"
+    ],
+    "evidence_chunk_ids": [
+      "f5f4498e5f8443b2"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "用 stream 的时候报 result 未定义，是不是得改成 invoke？",
+    "expected_sources": [
+      "langchain/11_十一常见错误对照表.md"
+    ],
+    "evidence_chunk_ids": [
+      "adf2ef342f0cc330"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "对话状态到底存在哪，重启容器后会不会丢？",
+    "expected_sources": [
+      "notes/02_二架构图.md"
+    ],
+    "evidence_chunk_ids": [
+      "817a836bd67475e2"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "之前用 Redis 做缓存为什么后来不用了？",
+    "expected_sources": [
+      "notes/02_二架构图.md"
+    ],
+    "evidence_chunk_ids": [
+      "817a836bd67475e2"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "模型怎么判断要不要调用工具，调完之后又怎么继续？",
+    "expected_sources": [
+      "notes/02_二架构图.md"
+    ],
+    "evidence_chunk_ids": [
+      "fec0e369aac6efeb"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "你们检索这块具体是怎么做的？用了哪些技术组合？",
+    "expected_sources": [
+      "notes/03_三技术栈.md"
+    ],
+    "evidence_chunk_ids": [
+      "c836dac8dee2eaa9"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "记忆持久化用的是什么方案？以后能换数据库吗？",
+    "expected_sources": [
+      "notes/03_三技术栈.md"
+    ],
+    "evidence_chunk_ids": [
+      "6d20d3473372458c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么防止模型乱答产生幻觉？有做阈值控制吗？",
+    "expected_sources": [
+      "notes/03_三技术栈.md"
+    ],
+    "evidence_chunk_ids": [
+      "6d20d3473372458c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "重启或者容器重建之后，之前聊过的内容还会保留吗？",
+    "expected_sources": [
+      "notes/04_四核心功能.md"
+    ],
+    "evidence_chunk_ids": [
+      "85c67aaa116cb571"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "检索到的内容怎么保证不瞎编，有降级处理吗？",
+    "expected_sources": [
+      "notes/04_四核心功能.md"
+    ],
+    "evidence_chunk_ids": [
+      "85c67aaa116cb571"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "镜像体积是怎么从三点多G压到两点多G的？",
+    "expected_sources": [
+      "notes/04_四核心功能.md"
+    ],
+    "evidence_chunk_ids": [
+      "f9b123e2cdbe8982"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个混合检索函数默认给向量检索和关键词检索各分配多少权重？",
+    "expected_sources": [
+      "notes/05_五RAG_完整链路面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "2911a1651b26448e"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "加权RRF是怎么把两路检索的排名分数加在一起的？",
+    "expected_sources": [
+      "notes/05_五RAG_完整链路面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "983121285cc3056f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "向量检索那一路是怎么拿到带距离的分数结果的？",
+    "expected_sources": [
+      "notes/05_五RAG_完整链路面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "2911a1651b26448e"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么防止报错信息把密钥或路径泄露给用户？",
+    "expected_sources": [
+      "notes/06_六遇到的坑面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "704d813ec522ccfa"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Docker 数据默认存在 C 盘，怎么挪到其他盘？",
+    "expected_sources": [
+      "notes/06_六遇到的坑面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "911f47981718fae1"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "用字符串包含判断错误类型为什么会误判？",
+    "expected_sources": [
+      "notes/06_六遇到的坑面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "704d813ec522ccfa"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么才能让镜像体积从十多G压到两个多G？",
+    "expected_sources": [
+      "notes/08_八项目数据面试时能报的具体数字.md"
+    ],
+    "evidence_chunk_ids": [
+      "6bfd76d5a1b6127a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "容器重建后checkpoints数据会不会丢？",
+    "expected_sources": [
+      "notes/08_八项目数据面试时能报的具体数字.md"
+    ],
+    "evidence_chunk_ids": [
+      "6bfd76d5a1b6127a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "检索时先召回多少条再精排到几条？",
+    "expected_sources": [
+      "notes/08_八项目数据面试时能报的具体数字.md"
+    ],
+    "evidence_chunk_ids": [
+      "019c02a8b0b21acb"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么验证重启服务后对话记忆还在？",
+    "expected_sources": [
+      "notes/09_九可演示的操作.md"
+    ],
+    "evidence_chunk_ids": [
+      "b7e31e02bd099658"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "换个会话ID提问，能看出不同会话之间互不干扰吗？",
+    "expected_sources": [
+      "notes/09_九可演示的操作.md"
+    ],
+    "evidence_chunk_ids": [
+      "12e6111f8e1dc9f4"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么用一条命令跑出检索效果的对比结果？",
+    "expected_sources": [
+      "notes/09_九可演示的操作.md"
+    ],
+    "evidence_chunk_ids": [
+      "12e6111f8e1dc9f4"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "检索到的结果里有多少是真正相关的？",
+    "expected_sources": [
+      "notes/10_十RAG_延伸知识点面试加分.md"
+    ],
+    "evidence_chunk_ids": [
+      "b729a963d0d24eb7"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想知道第一个正确结果排在第几位，看哪个指标？",
+    "expected_sources": [
+      "notes/10_十RAG_延伸知识点面试加分.md"
+    ],
+    "evidence_chunk_ids": [
+      "b729a963d0d24eb7"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想找个不用自己管持久化、还能按元数据筛选的向量库，选哪个？",
+    "expected_sources": [
+      "notes/10_十RAG_延伸知识点面试加分.md"
+    ],
+    "evidence_chunk_ids": [
+      "064f472edcbc0341"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "既然 Redis 缓存命中率是零，为什么项目里还保留着它？",
+    "expected_sources": [
+      "notes/11_十一MySQL_展示层_Redis_预留工程化.md"
+    ],
+    "evidence_chunk_ids": [
+      "38527c0222ae1d66"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Agent 的记忆到底存在哪里，是 MySQL 吗？",
+    "expected_sources": [
+      "notes/11_十一MySQL_展示层_Redis_预留工程化.md"
+    ],
+    "evidence_chunk_ids": [
+      "70ff713aed5ae65a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "用户要查历史对话时，系统是从哪个存储读数据的？",
+    "expected_sources": [
+      "notes/11_十一MySQL_展示层_Redis_预留工程化.md"
+    ],
+    "evidence_chunk_ids": [
+      "70ff713aed5ae65a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "流式输出时怎么把工具调用那段跳过去？",
+    "expected_sources": [
+      "notes/12_十二FastAPI_服务层设计面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "ae301a25d69c28db"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "连 MySQL 的密码和库名从哪读？",
+    "expected_sources": [
+      "notes/12_十二FastAPI_服务层设计面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "79a7551c8cc17f70"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "用环境变量配数据库连接时端口怎么写？",
+    "expected_sources": [
+      "notes/12_十二FastAPI_服务层设计面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "79a7551c8cc17f70"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "你们评估时除了召回率还看哪些指标？",
+    "expected_sources": [
+      "notes/13_十三RAG_评估面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "425403447d4b71f9"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "现在哪些改进已经做完了，哪些还没开始？",
+    "expected_sources": [
+      "notes/13_十三RAG_评估面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "9bfdd8e2857badd4"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么判断检索对了但回答还是不对的情况？",
+    "expected_sources": [
+      "notes/13_十三RAG_评估面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "425403447d4b71f9"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "构建失败时发现C盘空间只剩多少了？",
+    "expected_sources": [
+      "notes/14_十四Docker_部署完整方案面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "f4fd4841219aeb72"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "项目最后搬到哪个目录才绕开了文件锁？",
+    "expected_sources": [
+      "notes/14_十四Docker_部署完整方案面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "f4fd4841219aeb72"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "容器里设置哪些环境变量能让模型下载走镜像并且离线运行？",
+    "expected_sources": [
+      "notes/14_十四Docker_部署完整方案面试重点.md"
+    ],
+    "evidence_chunk_ids": [
+      "31184f58c21a0edc"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "候选数从20降到10，精排能快多少？效果会差多少？",
+    "expected_sources": [
+      "notes/15_十五项目新增数据更新.md"
+    ],
+    "evidence_chunk_ids": [
+      "c348c83d417054bb"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Rerank模型现在多大，单次请求大概要等多久？",
+    "expected_sources": [
+      "notes/15_十五项目新增数据更新.md"
+    ],
+    "evidence_chunk_ids": [
+      "c348c83d417054bb"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "最近测试集和语料规模都扩了多少？",
+    "expected_sources": [
+      "notes/15_十五项目新增数据更新.md"
+    ],
+    "evidence_chunk_ids": [
+      "d1f08cde9babd1ee"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "知识库里现在一共有多少篇文档和多少个chunk？",
+    "expected_sources": [
+      "notes/16_十六项目数据汇总最新.md"
+    ],
+    "evidence_chunk_ids": [
+      "e08561f4288048a4"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "评估集v3里带evidence chunk id的测试项有多少个？",
+    "expected_sources": [
+      "notes/16_十六项目数据汇总最新.md"
+    ],
+    "evidence_chunk_ids": [
+      "e08561f4288048a4"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "混合检索里向量和BM25的权重分别是多少？",
+    "expected_sources": [
+      "notes/16_十六项目数据汇总最新.md"
+    ],
+    "evidence_chunk_ids": [
+      "706d32be90a4b76a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "我项目里那个进阶版流程，检索完Top-20之后还做了什么精排？",
+    "expected_sources": [
+      "notes_interview/q02_RAG_的完整流程.md"
+    ],
+    "evidence_chunk_ids": [
+      "ed3a83e8efb21eb8"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "RAG从加载文档到让模型回答，中间大概有哪几个步骤？",
+    "expected_sources": [
+      "notes_interview/q02_RAG_的完整流程.md"
+    ],
+    "evidence_chunk_ids": [
+      "34710030794c1a3c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "进阶版里那个降级判断是怎么设阈值的？",
+    "expected_sources": [
+      "notes_interview/q02_RAG_的完整流程.md"
+    ],
+    "evidence_chunk_ids": [
+      "ed3a83e8efb21eb8"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "检索没查到东西的时候，模型怎么才能不瞎编？",
+    "expected_sources": [
+      "notes_interview/q03_怎么防止_RAG_幻觉.md"
+    ],
+    "evidence_chunk_ids": [
+      "01560874a5db1f56"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么判断用户问的问题跟知识库内容离得太远？",
+    "expected_sources": [
+      "notes_interview/q03_怎么防止_RAG_幻觉.md"
+    ],
+    "evidence_chunk_ids": [
+      "f34bcbd4b7d150e2"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么把检索回来的大量内容筛掉不相关的？",
+    "expected_sources": [
+      "notes_interview/q03_怎么防止_RAG_幻觉.md"
+    ],
+    "evidence_chunk_ids": [
+      "01560874a5db1f56"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么小模型在CPU上跑就够了，没必要装GPU版本？",
+    "expected_sources": [
+      "notes_interview/q06_为什么要用_Docker.md"
+    ],
+    "evidence_chunk_ids": [
+      "1e2376f71194ad20"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "镜像体积是怎么从3.51GB降到2.42GB的？",
+    "expected_sources": [
+      "notes_interview/q06_为什么要用_Docker.md"
+    ],
+    "evidence_chunk_ids": [
+      "0083eb40dd8e32fb"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "多阶段构建具体怎么帮镜像瘦身，能省多少空间？",
+    "expected_sources": [
+      "notes_interview/q06_为什么要用_Docker.md"
+    ],
+    "evidence_chunk_ids": [
+      "0083eb40dd8e32fb"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "MCP Server 改成常驻之后，工具调用还会那么慢吗？",
+    "expected_sources": [
+      "notes_interview/q07_并发量高怎么优化.md"
+    ],
+    "evidence_chunk_ids": [
+      "d8bce87b1ae2d9db"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "在 CPU 上跑 Reranker 精排大概要花多长时间？",
+    "expected_sources": [
+      "notes_interview/q07_并发量高怎么优化.md"
+    ],
+    "evidence_chunk_ids": [
+      "4cc05144eae81487"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "高并发场景下 Reranker 太慢，有什么优化办法？",
+    "expected_sources": [
+      "notes_interview/q07_并发量高怎么优化.md"
+    ],
+    "evidence_chunk_ids": [
+      "4cc05144eae81487"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "MMR这个算法到底是在什么粒度上做多样性的？",
+    "expected_sources": [
+      "notes_interview/q09_MMR_是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "fe203eea3636abac"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "MMR在v3测试集上准确率比普通相似度低多少？",
+    "expected_sources": [
+      "notes_interview/q09_MMR_是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "f99d118aef6b219f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "光看source strict指标会不会漏掉chunk层面的问题？",
+    "expected_sources": [
+      "notes_interview/q09_MMR_是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "f99d118aef6b219f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "混合检索是怎么把两种搜索方式结合起来的？",
+    "expected_sources": [
+      "notes_interview/q10_混合检索是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "e339068ed9032579"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "RRF 合并结果时有什么需要特别注意的地方？",
+    "expected_sources": [
+      "notes_interview/q10_混合检索是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "e339068ed9032579"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "混合检索在测试集上比纯相似度检索强多少？",
+    "expected_sources": [
+      "notes_interview/q10_混合检索是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "0e615b03bb3cce57"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Agent 要是循环停不下来，有什么办法能限制它？",
+    "expected_sources": [
+      "notes_interview/q11_怎么防止_Agent_死循环.md"
+    ],
+    "evidence_chunk_ids": [
+      "0205d1547b811583"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "如果 Agent 超过循环次数被中断了，服务会不会直接挂掉？",
+    "expected_sources": [
+      "notes_interview/q11_怎么防止_Agent_死循环.md"
+    ],
+    "evidence_chunk_ids": [
+      "0205d1547b811583"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "面试时怎么用两句话讲清楚 Agent 的防护措施？",
+    "expected_sources": [
+      "notes_interview/q11_怎么防止_Agent_死循环.md"
+    ],
+    "evidence_chunk_ids": [
+      "cde933d58cf8d701"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Agent 的对话历史是怎么自动加载的？",
+    "expected_sources": [
+      "notes_interview/q12_Agent_多轮对话怎么实现.md"
+    ],
+    "evidence_chunk_ids": [
+      "72c5268c56c68309"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "checkpointer 用的是哪个存储实现？",
+    "expected_sources": [
+      "notes_interview/q12_Agent_多轮对话怎么实现.md"
+    ],
+    "evidence_chunk_ids": [
+      "72c5268c56c68309"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "启动时检查点数据库文件放在哪里？",
+    "expected_sources": [
+      "notes_interview/q12_Agent_多轮对话怎么实现.md"
+    ],
+    "evidence_chunk_ids": [
+      "bf2e83ca184be733"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "知识库搜不到内容时，你们系统现在是怎么一步步处理的？",
+    "expected_sources": [
+      "notes_interview/q13_检索不到内容怎么处理.md"
+    ],
+    "evidence_chunk_ids": [
+      "320940d5eb095bf0"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "只靠向量距离阈值来判断要不要返回空，有什么不够用的地方？",
+    "expected_sources": [
+      "notes_interview/q13_检索不到内容怎么处理.md"
+    ],
+    "evidence_chunk_ids": [
+      "43f4bc4822fb7a13"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "工具已经说没找到了，模型还可能接着编，这种情况该怎么真正拦住？",
+    "expected_sources": [
+      "notes_interview/q13_检索不到内容怎么处理.md"
+    ],
+    "evidence_chunk_ids": [
+      "43f4bc4822fb7a13",
+      "320940d5eb095bf0"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "回答里的事实都能在资料里找到依据，这个指标叫啥？",
+    "expected_sources": [
+      "notes_interview/q14_RAG_评估用什么指标.md"
+    ],
+    "evidence_chunk_ids": [
+      "c07bc6b73a7d0994"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "检索时怎么判断粗排有没有把正确片段捞回来？",
+    "expected_sources": [
+      "notes_interview/q14_RAG_评估用什么指标.md"
+    ],
+    "evidence_chunk_ids": [
+      "7b2513382fa940dd"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么区分是检索没找到还是模型答得不忠实？",
+    "expected_sources": [
+      "notes_interview/q14_RAG_评估用什么指标.md"
+    ],
+    "evidence_chunk_ids": [
+      "c07bc6b73a7d0994"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么不能直接把报错的原始信息返回给用户？",
+    "expected_sources": [
+      "notes_interview/q15_错误信息怎么处理.md"
+    ],
+    "evidence_chunk_ids": [
+      "6e6aaa41818892da"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "遇到401状态码时，给用户的提示是什么？",
+    "expected_sources": [
+      "notes_interview/q15_错误信息怎么处理.md"
+    ],
+    "evidence_chunk_ids": [
+      "6da4e7b162994453"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "代码里是根据什么来判断该返回哪种错误提示的？",
+    "expected_sources": [
+      "notes_interview/q15_错误信息怎么处理.md"
+    ],
+    "evidence_chunk_ids": [
+      "6da4e7b162994453",
+      "6e6aaa41818892da"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Docker 构建时报错说解压镜像层失败，一般是什么原因造成的？",
+    "expected_sources": [
+      "notes_interview/q17_Docker_构建失败怎么排查.md"
+    ],
+    "evidence_chunk_ids": [
+      "378ac1ff4e013b13",
+      "f1a546b6e41fd2bb"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么判断 Docker 构建失败是发生在编译阶段还是写盘阶段？",
+    "expected_sources": [
+      "notes_interview/q17_Docker_构建失败怎么排查.md"
+    ],
+    "evidence_chunk_ids": [
+      "f1a546b6e41fd2bb"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Docker Desktop 在 Windows 上把数据存在哪里，怎么查看它占用的磁盘空间？",
+    "expected_sources": [
+      "notes_interview/q17_Docker_构建失败怎么排查.md"
+    ],
+    "evidence_chunk_ids": [
+      "f1a546b6e41fd2bb"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么改了 Dockerfile 之后 pip 就开始一直超时了？",
+    "expected_sources": [
+      "notes_interview/q18_为什么_pip_突然开始超时.md"
+    ],
+    "evidence_chunk_ids": [
+      "cfa7b52a791b5764"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "torch 装起来要下载好几个 G，有什么办法能把下载量降下来？",
+    "expected_sources": [
+      "notes_interview/q18_为什么_pip_突然开始超时.md"
+    ],
+    "evidence_chunk_ids": [
+      "92a9a7afc80ec06d"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "pip 装依赖老超时，换源和加超时参数之外还有啥根本解决办法？",
+    "expected_sources": [
+      "notes_interview/q18_为什么_pip_突然开始超时.md"
+    ],
+    "evidence_chunk_ids": [
+      "cfa7b52a791b5764",
+      "92a9a7afc80ec06d"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么判断下载的 wheel 文件能不能在容器里用？",
+    "expected_sources": [
+      "notes_interview/q19_Windows_下载的_wheel_能给_Linux_容器用吗.md"
+    ],
+    "evidence_chunk_ids": [
+      "4bc5ab7d149c9f16"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Windows 上下载的 wheel 包能直接放到 Linux 容器里装吗？",
+    "expected_sources": [
+      "notes_interview/q19_Windows_下载的_wheel_能给_Linux_容器用吗.md"
+    ],
+    "evidence_chunk_ids": [
+      "fcb5a30fea56be98"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "在宿主机上给容器下载 wheel 要注意什么？",
+    "expected_sources": [
+      "notes_interview/q19_Windows_下载的_wheel_能给_Linux_容器用吗.md"
+    ],
+    "evidence_chunk_ids": [
+      "4bc5ab7d149c9f16",
+      "fcb5a30fea56be98"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "多阶段构建的镜像为什么能变小？",
+    "expected_sources": [
+      "notes_interview/q20_多阶段构建的好处是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "99573fb5e1312974",
+      "b3c660e783cc7eb8"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "运行时镜像里为什么不需要装编译器？",
+    "expected_sources": [
+      "notes_interview/q20_多阶段构建的好处是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "99573fb5e1312974"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "不装 gcc 这类工具对安全有什么好处？",
+    "expected_sources": [
+      "notes_interview/q20_多阶段构建的好处是什么.md"
+    ],
+    "evidence_chunk_ids": [
+      "b3c660e783cc7eb8"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "程序里那个数据目录默认会放在哪儿？",
+    "expected_sources": [
+      "notes_interview/q21_Docker_容器重建后LangGraph_的记忆会丢吗.md"
+    ],
+    "evidence_chunk_ids": [
+      "fabf713dc77cbdfd"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么让容器里的数据在重启后还留着？",
+    "expected_sources": [
+      "notes_interview/q21_Docker_容器重建后LangGraph_的记忆会丢吗.md"
+    ],
+    "evidence_chunk_ids": [
+      "4209c51db9582591"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么验证对话记忆在容器重建后还在？",
+    "expected_sources": [
+      "notes_interview/q21_Docker_容器重建后LangGraph_的记忆会丢吗.md"
+    ],
+    "evidence_chunk_ids": [
+      "4209c51db9582591"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "代码里是怎么判断该用哪个 HuggingFace 缓存目录的？",
+    "expected_sources": [
+      "notes_interview/q22_为什么要让_HF_HOME_三级探测.md"
+    ],
+    "evidence_chunk_ids": [
+      "c6e283c14ed1a32e"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么不能只靠环境变量来确定 HF_HOME 的位置？",
+    "expected_sources": [
+      "notes_interview/q22_为什么要让_HF_HOME_三级探测.md"
+    ],
+    "evidence_chunk_ids": [
+      "9754f56d24add7e5"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "子进程里 HF_HOME 丢失会导致什么报错？",
+    "expected_sources": [
+      "notes_interview/q22_为什么要让_HF_HOME_三级探测.md"
+    ],
+    "evidence_chunk_ids": [
+      "9754f56d24add7e5"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "脚本在子目录里跑的时候，怎么让它找到项目根目录的模块？",
+    "expected_sources": [
+      "notes_interview/q23_为什么要抽公共_hybrid_search_模块.md"
+    ],
+    "evidence_chunk_ids": [
+      "4a27244ca20c299f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么要把混合检索的逻辑单独抽成一个公共模块？",
+    "expected_sources": [
+      "notes_interview/q23_为什么要抽公共_hybrid_search_模块.md"
+    ],
+    "evidence_chunk_ids": [
+      "002608f6b99813e7"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "抽完公共模块后，Docker 镜像构建时还需要额外做什么？",
+    "expected_sources": [
+      "notes_interview/q23_为什么要抽公共_hybrid_search_模块.md"
+    ],
+    "evidence_chunk_ids": [
+      "002608f6b99813e7"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个校准方法里正样本是怎么抽出来的？",
+    "expected_sources": [
+      "notes_interview/q24_MAX_DISTANCE_阈值怎么定的.md"
+    ],
+    "evidence_chunk_ids": [
+      "daa4a64e77b16b97"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "负样本里的easy和hard两组分别包含哪些内容？",
+    "expected_sources": [
+      "notes_interview/q24_MAX_DISTANCE_阈值怎么定的.md"
+    ],
+    "evidence_chunk_ids": [
+      "daa4a64e77b16b97"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "跑完校准后会生成哪些文件？",
+    "expected_sources": [
+      "notes_interview/q24_MAX_DISTANCE_阈值怎么定的.md"
+    ],
+    "evidence_chunk_ids": [
+      "31f070c216209318"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "候选召回高但最终召回低，问题出在哪一步？",
+    "expected_sources": [
+      "notes_interview/q25_为什么要加_Rerank.md"
+    ],
+    "evidence_chunk_ids": [
+      "84a0accb99d38576"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么不能跳过粗排直接用精排模型？",
+    "expected_sources": [
+      "notes_interview/q25_为什么要加_Rerank.md"
+    ],
+    "evidence_chunk_ids": [
+      "23fb402fc95b406c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "整套检索流程在普通电脑上跑一遍大概要多久？",
+    "expected_sources": [
+      "notes_interview/q25_为什么要加_Rerank.md"
+    ],
+    "evidence_chunk_ids": [
+      "84a0accb99d38576",
+      "23fb402fc95b406c"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "用户发消息后，后端是怎么一步步走到检索那块的？",
+    "expected_sources": [
+      "readme/01_架构.md"
+    ],
+    "evidence_chunk_ids": [
+      "40a4daf8c6c514a1"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "检索结果不够好时，系统会先做什么判断再继续？",
+    "expected_sources": [
+      "readme/01_架构.md"
+    ],
+    "evidence_chunk_ids": [
+      "7f0c4bf725d4270b"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "召回和精排分别用了什么方法，最后留下几条结果？",
+    "expected_sources": [
+      "readme/01_架构.md"
+    ],
+    "evidence_chunk_ids": [
+      "7f0c4bf725d4270b"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "服务重启后之前的对话记录还能找回来吗？",
+    "expected_sources": [
+      "readme/02_核心功能.md"
+    ],
+    "evidence_chunk_ids": [
+      "b436c3a0dbf3bc32"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "检索这块是怎么先粗筛再精排的？",
+    "expected_sources": [
+      "readme/02_核心功能.md"
+    ],
+    "evidence_chunk_ids": [
+      "b436c3a0dbf3bc32"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "调用聊天接口需要带什么凭证？不同租户的数据会混在一起吗？",
+    "expected_sources": [
+      "readme/02_核心功能.md"
+    ],
+    "evidence_chunk_ids": [
+      "cdb871a337d56e19"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "项目里用来做检索和重排序的公共模块在哪个文件？",
+    "expected_sources": [
+      "readme/03_目录结构.md"
+    ],
+    "evidence_chunk_ids": [
+      "5ba73a379c0ac213"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "评估脚本跑完之后，标定出来的图放在哪个目录？",
+    "expected_sources": [
+      "readme/03_目录结构.md"
+    ],
+    "evidence_chunk_ids": [
+      "6fc8b9bb03b7cda5"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "知识库文档总共多少篇，都分了哪些主题子目录？",
+    "expected_sources": [
+      "readme/03_目录结构.md"
+    ],
+    "evidence_chunk_ids": [
+      "5ba73a379c0ac213",
+      "6fc8b9bb03b7cda5"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想把那两个模型文件提前下载到本地缓存，该跑什么命令？",
+    "expected_sources": [
+      "readme/04_启动.md"
+    ],
+    "evidence_chunk_ids": [
+      "836e1d27edde4855"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "第一次构建并启动服务大概要等多久？",
+    "expected_sources": [
+      "readme/04_启动.md"
+    ],
+    "evidence_chunk_ids": [
+      "bebf41a5658de28c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "服务搭好以后，平时再启动还需要重新构建吗？",
+    "expected_sources": [
+      "readme/04_启动.md"
+    ],
+    "evidence_chunk_ids": [
+      "bebf41a5658de28c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "哪些接口不需要登录就能访问？",
+    "expected_sources": [
+      "readme/05_接口.md"
+    ],
+    "evidence_chunk_ids": [
+      "cc29d42f375987ee"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "调用普通对话接口时，请求体里必须带哪个字段？",
+    "expected_sources": [
+      "readme/05_接口.md"
+    ],
+    "evidence_chunk_ids": [
+      "cc29d42f375987ee",
+      "0e257185a7ae0282"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "用 curl 发普通对话请求时，鉴权信息该怎么写？",
+    "expected_sources": [
+      "readme/05_接口.md"
+    ],
+    "evidence_chunk_ids": [
+      "0e257185a7ae0282"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "DeepSeek 的接口地址要改的话，该设哪个变量？",
+    "expected_sources": [
+      "readme/06_环境变量.md"
+    ],
+    "evidence_chunk_ids": [
+      "6b41a31cb9010db9"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "拿到项目后环境变量文件该怎么弄？",
+    "expected_sources": [
+      "readme/06_环境变量.md"
+    ],
+    "evidence_chunk_ids": [
+      "91c12702b21bb33d"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "我想让不同用户各用各的 key，怎么配？",
+    "expected_sources": [
+      "readme/06_环境变量.md"
+    ],
+    "evidence_chunk_ids": [
+      "6b41a31cb9010db9",
+      "91c12702b21bb33d"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "候选召回挺高但最终召回很低，问题一般出在哪个环节？",
+    "expected_sources": [
+      "readme/07_RAG_评估.md"
+    ],
+    "evidence_chunk_ids": [
+      "3d4c2e18175f19ed"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想判断两个检索策略的差距是不是真的显著，该怎么分析？",
+    "expected_sources": [
+      "readme/07_RAG_评估.md"
+    ],
+    "evidence_chunk_ids": [
+      "3d4c2e18175f19ed"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "生成多金标测试集并跑检索评估，具体要执行哪些脚本命令？",
+    "expected_sources": [
+      "readme/07_RAG_评估.md"
+    ],
+    "evidence_chunk_ids": [
+      "a5d92a5225c68722"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "测试集生成脚本是怎么给每篇文档挑chunk的？",
+    "expected_sources": [
+      "readme/08_测试集自动生成.md"
+    ],
+    "evidence_chunk_ids": [
+      "66a93d2b45d91c6d"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "生成的问题里evidence字段有哪几种取值？",
+    "expected_sources": [
+      "readme/08_测试集自动生成.md"
+    ],
+    "evidence_chunk_ids": [
+      "66a93d2b45d91c6d"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "同一个结论在多篇文档里都有，只标一个chunk会有什么问题？",
+    "expected_sources": [
+      "readme/08_测试集自动生成.md"
+    ],
+    "evidence_chunk_ids": [
+      "9afbf78ba144fc94"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "负样本是怎么分成两组的？",
+    "expected_sources": [
+      "readme/09_阈值标定.md"
+    ],
+    "evidence_chunk_ids": [
+      "f628cb6bc38e2580"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "被接受的结果里负样本占多少，这个指标怎么算？",
+    "expected_sources": [
+      "readme/09_阈值标定.md"
+    ],
+    "evidence_chunk_ids": [
+      "af2a36c60b10b013"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么标定时要分开报 easy 和 hard 的 FPR？",
+    "expected_sources": [
+      "readme/09_阈值标定.md"
+    ],
+    "evidence_chunk_ids": [
+      "af2a36c60b10b013"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个系统里做检索用到了哪些技术组件？",
+    "expected_sources": [
+      "readme/10_技术栈.md"
+    ],
+    "evidence_chunk_ids": [
+      "2da86c72736e7e2f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "线上部署时容器镜像有多大，是怎么构建的？",
+    "expected_sources": [
+      "readme/10_技术栈.md"
+    ],
+    "evidence_chunk_ids": [
+      "235199476b600640"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "对话记忆在生产环境能换成别的存储方案吗？",
+    "expected_sources": [
+      "readme/10_技术栈.md"
+    ],
+    "evidence_chunk_ids": [
+      "235199476b600640"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "用多阶段构建后镜像能小多少啊？",
+    "expected_sources": [
+      "readme/11_设计决策.md"
+    ],
+    "evidence_chunk_ids": [
+      "cbc4137d307a9e05"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为啥要把原来那个大笔记文件拆成好多小文件？",
+    "expected_sources": [
+      "readme/11_设计决策.md"
+    ],
+    "evidence_chunk_ids": [
+      "e4f6e5eef9709482"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "模型缓存用 volume 挂载有什么好处？",
+    "expected_sources": [
+      "readme/11_设计决策.md"
+    ],
+    "evidence_chunk_ids": [
+      "cbc4137d307a9e05"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个0.96的阈值是不是代表最终回答出错的概率？",
+    "expected_sources": [
+      "readme/12_已知不足.md"
+    ],
+    "evidence_chunk_ids": [
+      "531500fd0d2df39e"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "如果检索什么都没搜到，模型还会不会硬编答案？",
+    "expected_sources": [
+      "readme/12_已知不足.md"
+    ],
+    "evidence_chunk_ids": [
+      "531500fd0d2df39e"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "测试集是拿项目自己的笔记出的题，这样评估靠谱吗？",
+    "expected_sources": [
+      "readme/12_已知不足.md"
+    ],
+    "evidence_chunk_ids": [
+      "df0ace6667b47c00"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "哪些故事涉及磁盘和 Docker 环境相关的问题？",
+    "expected_sources": [
+      "stories/01_快速索引.md"
+    ],
+    "evidence_chunk_ids": [
+      "fa2d74c37ae988a6"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "模型 API 限制对应的是哪个故事？",
+    "expected_sources": [
+      "stories/01_快速索引.md"
+    ],
+    "evidence_chunk_ids": [
+      "272e8d86955219ee"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "构建优化在哪个片段里被提到，对应哪些故事？",
+    "expected_sources": [
+      "stories/01_快速索引.md"
+    ],
+    "evidence_chunk_ids": [
+      "272e8d86955219ee"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "DeepSeek 那边报错说 response_format 类型不可用，是怎么回事？",
+    "expected_sources": [
+      "stories/02_故事_1DeepSeek_不支持_json_schema.md"
+    ],
+    "evidence_chunk_ids": [
+      "8674ee42d41a356a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "有什么办法能不依赖模型接口的 json_schema 也能拿到结构化结果？",
+    "expected_sources": [
+      "stories/02_故事_1DeepSeek_不支持_json_schema.md"
+    ],
+    "evidence_chunk_ids": [
+      "84dbdc9af6938093"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么改用 PydanticOutputParser 会比原来的方式更稳妥？",
+    "expected_sources": [
+      "stories/02_故事_1DeepSeek_不支持_json_schema.md"
+    ],
+    "evidence_chunk_ids": [
+      "84dbdc9af6938093",
+      "8674ee42d41a356a"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么装了 langchain-mcp-adapters 之后 fastmcp 就跑不起来了？",
+    "expected_sources": [
+      "stories/03_故事_2fastmcp_和_langchain-mcp-adapters_版本冲突.md"
+    ],
+    "evidence_chunk_ids": [
+      "59b40a08e8cedb47",
+      "c4e5909aa25834c3"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "fastmcp 报错说找不到 AuthorizationCodeResult，这是怎么回事？",
+    "expected_sources": [
+      "stories/03_故事_2fastmcp_和_langchain-mcp-adapters_版本冲突.md"
+    ],
+    "evidence_chunk_ids": [
+      "c4e5909aa25834c3"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "两个包版本打架了，有什么办法能让它们都正常工作？",
+    "expected_sources": [
+      "stories/03_故事_2fastmcp_和_langchain-mcp-adapters_版本冲突.md"
+    ],
+    "evidence_chunk_ids": [
+      "59b40a08e8cedb47"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么让HuggingFace的库完全不联网，只用本地缓存？",
+    "expected_sources": [
+      "stories/04_故事_3HuggingFace_联网卡住.md"
+    ],
+    "evidence_chunk_ids": [
+      "da90debe581ec8d1"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "加载本地embedding模型时一直卡在重试，是什么原因？",
+    "expected_sources": [
+      "stories/04_故事_3HuggingFace_联网卡住.md"
+    ],
+    "evidence_chunk_ids": [
+      "7d32ef1a49efef2d"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "国内网络下跑RAG，怎么解决模型加载时联网检查卡住的问题？",
+    "expected_sources": [
+      "stories/04_故事_3HuggingFace_联网卡住.md"
+    ],
+    "evidence_chunk_ids": [
+      "da90debe581ec8d1",
+      "7d32ef1a49efef2d"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么在 uvicorn 热重载模式下，模块顶层调用 asyncio.run 会报错？",
+    "expected_sources": [
+      "stories/05_故事_4uvicorn_--reload_下调_asynciorun_报错.md"
+    ],
+    "evidence_chunk_ids": [
+      "0d861c7af2a9d402"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "启动时加载 MCP 工具，用 FastAPI 的什么机制替代 asyncio.run 比较合适？",
+    "expected_sources": [
+      "stories/05_故事_4uvicorn_--reload_下调_asynciorun_报错.md"
+    ],
+    "evidence_chunk_ids": [
+      "ab2d26b6900b1bcc"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想在服务启动时初始化 agent 并在关闭时清理，代码应该写在哪里？",
+    "expected_sources": [
+      "stories/05_故事_4uvicorn_--reload_下调_asynciorun_报错.md"
+    ],
+    "evidence_chunk_ids": [
+      "ab2d26b6900b1bcc"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么用 FastAPI 的时候要换成异步调用方式？",
+    "expected_sources": [
+      "stories/06_故事_5MCP_工具同步调用报错.md"
+    ],
+    "evidence_chunk_ids": [
+      "f4ecf04f42f4207f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Agent 调用 MCP 工具时报错说不支持同步调用，这是怎么回事？",
+    "expected_sources": [
+      "stories/06_故事_5MCP_工具同步调用报错.md"
+    ],
+    "evidence_chunk_ids": [
+      "eba329f300d13ead"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "同步方式调用 MCP 工具为什么会失败，该怎么改？",
+    "expected_sources": [
+      "stories/06_故事_5MCP_工具同步调用报错.md"
+    ],
+    "evidence_chunk_ids": [
+      "f4ecf04f42f4207f",
+      "eba329f300d13ead"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么流式输出时只给用户看最终回答，不展示中间思考过程？",
+    "expected_sources": [
+      "stories/07_故事_6流式输出吞进中间步骤.md"
+    ],
+    "evidence_chunk_ids": [
+      "b2041f273f451eb0"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "纯聊天场景没有工具调用时，流式打字机效果为什么会打折扣？",
+    "expected_sources": [
+      "stories/07_故事_6流式输出吞进中间步骤.md"
+    ],
+    "evidence_chunk_ids": [
+      "b2041f273f451eb0"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "代码里怎么判断工具调用结束、开始实时输出文本内容？",
+    "expected_sources": [
+      "stories/07_故事_6流式输出吞进中间步骤.md"
+    ],
+    "evidence_chunk_ids": [
+      "c8c5b15fd3a8597c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么安排 Dockerfile 里的指令顺序才能让构建更快？",
+    "expected_sources": [
+      "stories/08_故事_7Docker_构建慢.md"
+    ],
+    "evidence_chunk_ids": [
+      "79c4f79a854aa31d",
+      "3e296689afe32a4a"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么把依赖安装放在复制代码前面？",
+    "expected_sources": [
+      "stories/08_故事_7Docker_构建慢.md"
+    ],
+    "evidence_chunk_ids": [
+      "79c4f79a854aa31d",
+      "3e296689afe32a4a"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "把模型下载放在构建阶段会有什么问题？",
+    "expected_sources": [
+      "stories/08_故事_7Docker_构建慢.md"
+    ],
+    "evidence_chunk_ids": [
+      "3e296689afe32a4a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么我在 MCP 服务器里加的 print 语句完全看不到输出？",
+    "expected_sources": [
+      "stories/09_故事_8MCP_Server_里的_print_看不到.md"
+    ],
+    "evidence_chunk_ids": [
+      "221245cdc3e2873b"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "MCP 里想打印日志，为什么推荐写到 stderr 而不是 stdout？",
+    "expected_sources": [
+      "stories/09_故事_8MCP_Server_里的_print_看不到.md"
+    ],
+    "evidence_chunk_ids": [
+      "221245cdc3e2873b",
+      "7f2b1bbfa6c647f1"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "用 stdio 通信的协议，日志一般应该输出到哪里？",
+    "expected_sources": [
+      "stories/09_故事_8MCP_Server_里的_print_看不到.md"
+    ],
+    "evidence_chunk_ids": [
+      "7f2b1bbfa6c647f1"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "混合检索里向量和关键词的分数权重一般怎么分配？",
+    "expected_sources": [
+      "stories/10_故事_9等权_RRF_反而更差.md"
+    ],
+    "evidence_chunk_ids": [
+      "04c9dac7911d8bc4"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么给向量检索更高的权重，而不是两边一样？",
+    "expected_sources": [
+      "stories/10_故事_9等权_RRF_反而更差.md"
+    ],
+    "evidence_chunk_ids": [
+      "04c9dac7911d8bc4"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "等权混合检索为什么效果还不如纯向量检索？",
+    "expected_sources": [
+      "stories/10_故事_9等权_RRF_反而更差.md"
+    ],
+    "evidence_chunk_ids": [
+      "8a4a849618707371"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "MMR 到底能不能保证检索结果来自不同文档？",
+    "expected_sources": [
+      "stories/11_故事_10MMR_是_chunk_级多样性.md"
+    ],
+    "evidence_chunk_ids": [
+      "d73def10574a806f",
+      "e79a7a10d008aa58"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想让结果按来源去重，代码上该怎么处理？",
+    "expected_sources": [
+      "stories/11_故事_10MMR_是_chunk_级多样性.md"
+    ],
+    "evidence_chunk_ids": [
+      "d73def10574a806f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "MMR 在精确匹配任务上表现怎么样？",
+    "expected_sources": [
+      "stories/11_故事_10MMR_是_chunk_级多样性.md"
+    ],
+    "evidence_chunk_ids": [
+      "e79a7a10d008aa58"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Agent 为什么会陷在反复调用工具里出不来？",
+    "expected_sources": [
+      "stories/12_故事_11Agent_可能死循环或_Token_爆炸.md"
+    ],
+    "evidence_chunk_ids": [
+      "df01ec1d975e7ec9"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "给 Agent 设的循环次数上限是多少，为什么定这个数？",
+    "expected_sources": [
+      "stories/12_故事_11Agent_可能死循环或_Token_爆炸.md"
+    ],
+    "evidence_chunk_ids": [
+      "48cdecdc94d851b6"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "护栏触发后服务会不会挂掉，是怎么处理的？",
+    "expected_sources": [
+      "stories/12_故事_11Agent_可能死循环或_Token_爆炸.md"
+    ],
+    "evidence_chunk_ids": [
+      "48cdecdc94d851b6"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么加了多轮对话后缓存必须带上会话ID？",
+    "expected_sources": [
+      "stories/13_故事_12多轮对话下的缓存串台.md"
+    ],
+    "evidence_chunk_ids": [
+      "40c1c82f8278ea54"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "缓存key里为什么还要保留MD5哈希？",
+    "expected_sources": [
+      "stories/13_故事_12多轮对话下的缓存串台.md"
+    ],
+    "evidence_chunk_ids": [
+      "d9428714cf99046f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "按会话隔离缓存会带来什么代价？",
+    "expected_sources": [
+      "stories/13_故事_12多轮对话下的缓存串台.md"
+    ],
+    "evidence_chunk_ids": [
+      "d9428714cf99046f"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "开发阶段用哪个记忆组件最省事？",
+    "expected_sources": [
+      "stories/14_故事_13InMemorySaver_的局限.md"
+    ],
+    "evidence_chunk_ids": [
+      "4d72cc1a89927679"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "服务重启后对话记录全没了是怎么回事？",
+    "expected_sources": [
+      "stories/14_故事_13InMemorySaver_的局限.md"
+    ],
+    "evidence_chunk_ids": [
+      "88842147876bd25c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "开发和生产环境该怎么选不同的记忆方案？",
+    "expected_sources": [
+      "stories/14_故事_13InMemorySaver_的局限.md"
+    ],
+    "evidence_chunk_ids": [
+      "4d72cc1a89927679",
+      "88842147876bd25c"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么判断检索到的内容跟问题不相关，直接不给大模型？",
+    "expected_sources": [
+      "stories/15_故事_14检索不到内容怎么避免幻觉.md"
+    ],
+    "evidence_chunk_ids": [
+      "c09eb3634637c9ee"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么就算提示词写了只用资料，模型还是会瞎编？",
+    "expected_sources": [
+      "stories/15_故事_14检索不到内容怎么避免幻觉.md"
+    ],
+    "evidence_chunk_ids": [
+      "b0cb476c00aab64c"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "检索结果的距离分数超过多少就该放弃回答？",
+    "expected_sources": [
+      "stories/15_故事_14检索不到内容怎么避免幻觉.md"
+    ],
+    "evidence_chunk_ids": [
+      "c09eb3634637c9ee",
+      "b0cb476c00aab64c"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么光看召回率没法判断检索结果排得好不好？",
+    "expected_sources": [
+      "stories/16_故事_15RAG_评估不能只看召回率.md"
+    ],
+    "evidence_chunk_ids": [
+      "921bdbc8dbb2302a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "精确率这个指标在代码里是怎么算出来的？",
+    "expected_sources": [
+      "stories/16_故事_15RAG_评估不能只看召回率.md"
+    ],
+    "evidence_chunk_ids": [
+      "e5cd1e964f8b0aa0"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "除了召回率，还应该加哪些指标来评估 RAG？",
+    "expected_sources": [
+      "stories/16_故事_15RAG_评估不能只看召回率.md"
+    ],
+    "evidence_chunk_ids": [
+      "921bdbc8dbb2302a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么服务一重启，之前聊过的内容就全没了？",
+    "expected_sources": [
+      "stories/17_故事_16InMemorySaver_重启丢记忆.md"
+    ],
+    "evidence_chunk_ids": [
+      "873162e6c0c80d0a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想让对话记录在重启后还留着，该换用哪种保存方式？",
+    "expected_sources": [
+      "stories/17_故事_16InMemorySaver_重启丢记忆.md"
+    ],
+    "evidence_chunk_ids": [
+      "873162e6c0c80d0a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "在 FastAPI 里怎么把对话记忆存到本地文件里？",
+    "expected_sources": [
+      "stories/17_故事_16InMemorySaver_重启丢记忆.md"
+    ],
+    "evidence_chunk_ids": [
+      "18c689e9cc06cf58"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "之前用内存存对话历史，现在改成什么方式了？",
+    "expected_sources": [
+      "stories/18_故事_17双源记忆打架架构重构.md"
+    ],
+    "evidence_chunk_ids": [
+      "c2e1ebd5071a4f42"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么要把手动加载历史那套逻辑删掉？",
+    "expected_sources": [
+      "stories/18_故事_17双源记忆打架架构重构.md"
+    ],
+    "evidence_chunk_ids": [
+      "c2e1ebd5071a4f42"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "改造前是怎么把历史消息和用户新消息拼一起的？",
+    "expected_sources": [
+      "stories/18_故事_17双源记忆打架架构重构.md"
+    ],
+    "evidence_chunk_ids": [
+      "7237eac00c3bcbf2"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么用子串匹配判断异常类型会出错？",
+    "expected_sources": [
+      "stories/19_故事_18错误信息泄漏安全防护.md"
+    ],
+    "evidence_chunk_ids": [
+      "4a7f7184c5a94428"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "遇到 429 状态码时函数会返回什么提示？",
+    "expected_sources": [
+      "stories/19_故事_18错误信息泄漏安全防护.md"
+    ],
+    "evidence_chunk_ids": [
+      "7ea3fb1d505c9e7b"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个函数能识别哪几种异常情况？",
+    "expected_sources": [
+      "stories/19_故事_18错误信息泄漏安全防护.md"
+    ],
+    "evidence_chunk_ids": [
+      "7ea3fb1d505c9e7b"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么同一个问题换个对话重新问，缓存就命中不了？",
+    "expected_sources": [
+      "stories/20_故事_19缓存_key_不含上下文缓存正确性.md"
+    ],
+    "evidence_chunk_ids": [
+      "52b5b533b3edd282"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "把上下文版本号加进缓存 key 后，命中率为什么会变成零？",
+    "expected_sources": [
+      "stories/20_故事_19缓存_key_不含上下文缓存正确性.md"
+    ],
+    "evidence_chunk_ids": [
+      "2897a237c3252cc1"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个缓存方案最后除了多查两次数据库，还有什么实际好处吗？",
+    "expected_sources": [
+      "stories/20_故事_19缓存_key_不含上下文缓存正确性.md"
+    ],
+    "evidence_chunk_ids": [
+      "52b5b533b3edd282",
+      "2897a237c3252cc1"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个项目里 FastAPI 和 Uvicorn 要求的最低版本是多少？",
+    "expected_sources": [
+      "stories/21_故事_20requirementstxt_从未在干净环境验证.md"
+    ],
+    "evidence_chunk_ids": [
+      "50b33c1c6e9573c6"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "你面试时提到过什么依赖没写进清单的坑？",
+    "expected_sources": [
+      "stories/21_故事_20requirementstxt_从未在干净环境验证.md"
+    ],
+    "evidence_chunk_ids": [
+      "6faa29aa4eb2dde2"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么检查 requirements.txt 是不是漏了包？",
+    "expected_sources": [
+      "stories/21_故事_20requirementstxt_从未在干净环境验证.md"
+    ],
+    "evidence_chunk_ids": [
+      "6faa29aa4eb2dde2"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "构建镜像时在解压那一步报错，说数据损坏不完整，这是哪出问题了？",
+    "expected_sources": [
+      "stories/22_故事_21Docker_构建报_unpigz_corrupted2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "9e704d91d5c23e65"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个报错到底是代码写错了还是环境的问题啊？",
+    "expected_sources": [
+      "stories/22_故事_21Docker_构建报_unpigz_corrupted2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "cbde18b5178dc015"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "镜像解压失败后，我该先查什么来确认原因？",
+    "expected_sources": [
+      "stories/22_故事_21Docker_构建报_unpigz_corrupted2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "cbde18b5178dc015"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么把 Docker 的镜像存储位置从 C 盘挪到别的盘？",
+    "expected_sources": [
+      "stories/23_故事_22Docker_数据从_C_盘迁到_D_盘2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "9b6b1281e4cc5f13"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "Docker 在 Windows 上占 C 盘空间特别大，是啥原因？",
+    "expected_sources": [
+      "stories/23_故事_22Docker_数据从_C_盘迁到_D_盘2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "64441c20ac564418"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "迁移 Docker 数据后 C 盘能腾出多少空间？",
+    "expected_sources": [
+      "stories/23_故事_22Docker_数据从_C_盘迁到_D_盘2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "9b6b1281e4cc5f13"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "我在 Dockerfile 里改 pip 安装命令时加了什么参数，可能导致超时？",
+    "expected_sources": [
+      "stories/24_故事_23pip_清华源突然超时2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "291e504fbabe6880"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "pip 安装老是超时，有什么换源或者加参数的办法？",
+    "expected_sources": [
+      "stories/24_故事_23pip_清华源突然超时2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "1736e5e9ee08d1a5"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想彻底解决镜像构建时下载包太慢的问题，有什么根本办法？",
+    "expected_sources": [
+      "stories/24_故事_23pip_清华源突然超时2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "1736e5e9ee08d1a5"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么直接装 torch 老是下载超时啊？",
+    "expected_sources": [
+      "stories/25_故事_24CPU_版_torch_vs_CUDA_版2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "4601f94205857b69"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "装 CPU 版的 torch 能比 CUDA 版省多少空间？",
+    "expected_sources": [
+      "stories/25_故事_24CPU_版_torch_vs_CUDA_版2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "f4b294c7c2ccf4e9"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "默认安装会顺带装上哪些和 CUDA 相关的大包？",
+    "expected_sources": [
+      "stories/25_故事_24CPU_版_torch_vs_CUDA_版2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "4601f94205857b69"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "宿主机和容器系统、Python 版本不一样，直接下载的 wheel 能通用吗？",
+    "expected_sources": [
+      "stories/26_故事_25Windows_wheel_不能给_Linux_容器用2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "9b6be86d85ce137a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "想让下载的 wheel 能在容器里用，命令里要加哪些参数？",
+    "expected_sources": [
+      "stories/26_故事_25Windows_wheel_不能给_Linux_容器用2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "21a4a11ad757628a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么在本地给容器下 wheel 这么容易出问题？",
+    "expected_sources": [
+      "stories/26_故事_25Windows_wheel_不能给_Linux_容器用2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "9b6be86d85ce137a"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "容器里启动后聊天接口一上来就报找不到模型路径，这是为啥？",
+    "expected_sources": [
+      "stories/27_故事_26MCP_Server_硬编码_HF_缓存路径2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "3e9cfe7f4ed33de0"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "程序是怎么决定 Hugging Face 缓存目录用哪个位置的？",
+    "expected_sources": [
+      "stories/27_故事_26MCP_Server_硬编码_HF_缓存路径2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "fade6085398833da"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "模型路径写死在代码里导致启动失败，有什么办法能避免？",
+    "expected_sources": [
+      "stories/27_故事_26MCP_Server_硬编码_HF_缓存路径2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "3e9cfe7f4ed33de0",
+      "fade6085398833da"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "checkpointer 的文件默认存到哪个目录？",
+    "expected_sources": [
+      "stories/28_故事_27checkpointsdb_无_volume容器重建丢记忆2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "bcfebf47d169aab7"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么要把 data 目录写进 .gitignore？",
+    "expected_sources": [
+      "stories/28_故事_27checkpointsdb_无_volume容器重建丢记忆2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "0f18f5c0dd7a3099"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "容器重建后怎么确认对话记录还在？",
+    "expected_sources": [
+      "stories/28_故事_27checkpointsdb_无_volume容器重建丢记忆2026-10-08.md"
+    ],
+    "evidence_chunk_ids": [
+      "bcfebf47d169aab7",
+      "0f18f5c0dd7a3099"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "这个计算召回概率的循环最后返回的是什么值？",
+    "expected_sources": [
+      "stories/29_故事_28评估代码和部署代码分叉2026-10-09.md"
+    ],
+    "evidence_chunk_ids": [
+      "8ad1cf674d01d464"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "那个评估脚本为什么要手动往 sys.path 里加项目根目录？",
+    "expected_sources": [
+      "stories/29_故事_28评估代码和部署代码分叉2026-10-09.md"
+    ],
+    "evidence_chunk_ids": [
+      "d7639ac03c232219"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "改完代码后，旧的混合搜索测试文件要怎么处理？",
+    "expected_sources": [
+      "stories/29_故事_28评估代码和部署代码分叉2026-10-09.md"
+    ],
+    "evidence_chunk_ids": [
+      "8ad1cf674d01d464"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么说随便定个距离阈值是种技术债？",
+    "expected_sources": [
+      "stories/30_故事_29MAX_DISTANCE_阈值拍脑袋定2026-10-10更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "d8d302cbc9fec6f9"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "当初那个1.1的阈值是怎么定下来的？",
+    "expected_sources": [
+      "stories/30_故事_29MAX_DISTANCE_阈值拍脑袋定2026-10-10更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "73b64353f28da500"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "光跑几条样例来验证阈值有什么问题？",
+    "expected_sources": [
+      "stories/30_故事_29MAX_DISTANCE_阈值拍脑袋定2026-10-10更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "d8d302cbc9fec6f9"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "加了两阶段检索后，精确率和MRR实际提升了多少？",
+    "expected_sources": [
+      "stories/31_故事_30Rerank_收益被语料规模压制2026-10-11更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "b932f6783c4fde46"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "为什么小语料下Rerank的提升看起来不明显？",
+    "expected_sources": [
+      "stories/31_故事_30Rerank_收益被语料规模压制2026-10-11更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "85bea7e346bb0f05"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "语料扩到98篇后，Rerank的召回率和MRR变成多少了？",
+    "expected_sources": [
+      "stories/31_故事_30Rerank_收益被语料规模压制2026-10-11更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "85bea7e346bb0f05"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "旧测试集里哪种策略的多样性表现最好？",
+    "expected_sources": [
+      "stories/32_故事_31测试集太小判别力不足2026-10-11更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "e6e1893e36f42d30"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么让程序自动扫描文档目录下的所有子文件夹？",
+    "expected_sources": [
+      "stories/32_故事_31测试集太小判别力不足2026-10-11更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "617a588245b3800d"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "按来源去重之后，精确率会下降多少？",
+    "expected_sources": [
+      "stories/32_故事_31测试集太小判别力不足2026-10-11更新于_2026-10-12.md"
+    ],
+    "evidence_chunk_ids": [
+      "e6e1893e36f42d30"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "混合检索和MMR在多样性上有什么区别？",
+    "expected_sources": [
+      "stories/33_总结.md"
+    ],
+    "evidence_chunk_ids": [
+      "c3919d9abd7d7738",
+      "90e2052a4e4240ad"
+    ],
+    "evidence_coverage_mode": "all",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "怎么防止AI胡说八道，有什么防护手段？",
+    "expected_sources": [
+      "stories/33_总结.md"
+    ],
+    "evidence_chunk_ids": [
+      "c3919d9abd7d7738"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  },
+  {
+    "question": "异步框架里初始化代码应该放哪里？",
+    "expected_sources": [
+      "stories/33_总结.md"
+    ],
+    "evidence_chunk_ids": [
+      "90e2052a4e4240ad"
+    ],
+    "evidence_coverage_mode": "any",
+    "generator_version": "v3-evidence"
+  }
+]

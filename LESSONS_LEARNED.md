@@ -2,7 +2,17 @@
 
 > 记录项目开发过程中遇到的问题、分析过程和解决方案。
 > 每个故事按"问题 → 分析 → 方案 → 收获"结构。
-> 最后更新：2026-10-16（新增「迭代故事（面试主线）」：把 10 条迭代弧提炼成面试主线；订正性能数字；修复 `/history` 越权 + 多租户隔离；新增故事 35：测试与 CI）
+> 最后更新：2026-10-17（评估可信度修复：617 chunk + chunk_id；v3 evidence chunk + 多金标；source/chunk 双粒度；端到端 LLM-as-judge；阈值 FPR/FDR）
+
+## 2026-10-17 最新评估口径（先看这里）
+
+这一轮把“只评 source 级检索”升级成三层评估，面试时建议按这三个故事讲：
+
+1. **source 级高估 9.4 个点**：Rerank source 69.3% vs chunk 59.9%。只报 source 会高估；单金标又会因为语料近重复而低估，所以用 evidence chunk + 近重复多金标，同时报 source/chunk。
+2. **距离阈值不是幻觉率**：0.96 下 easy 负样本 FPR 4%（1/25），hard 负样本 FPR 95%（19/20）。阈值只能拦明显离题，近域但库外的问题会漏过去；真正的拒答需要生成层充分性判断或 graph 分支。
+3. **faithfulness 100% 不等于回答正确**：80 正 + 20 负里，66 作答、14 有效拒答；作答项 faithfulness 100%、relevance 98.5%，但 2×2 显示 29/66 是“检索未命中 gold 但回答对上下文忠实”。瓶颈在检索/标注，不是生成；而且 judge 与回答模型同为 DeepSeek，存在自评偏好，100% 是上界。
+
+具体数字和复现命令以根目录 `README.md`、`eval/output/retrieval_v3.json`、`eval/output/calibration_v3.json`、`eval/output/e2e_summary.json` 为准。旧的 57.0% / 60.6% / 8~14 / 幻觉率 1% 只保留在历史故事里。
 
 ## 快速索引
 

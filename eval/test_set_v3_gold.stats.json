@@ -1,0 +1,20 @@
+{
+  "primary": {
+    "items": 267,
+    "ambiguous_items": 11,
+    "ambiguous_rate": 0.04119850187265917,
+    "added_chunk_labels": 15,
+    "added_source_labels": 15,
+    "threshold": 0.8,
+    "missing_evidence_ids": []
+  },
+  "sensitivity": {
+    "items": 267,
+    "ambiguous_items": 24,
+    "ambiguous_rate": 0.0898876404494382,
+    "added_chunk_labels": 32,
+    "added_source_labels": 26,
+    "threshold": 0.6,
+    "missing_evidence_ids": []
+  }
+}

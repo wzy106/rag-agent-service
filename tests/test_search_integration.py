@@ -27,6 +27,9 @@ def test_index_loads(retrieval):
     _, _, all_docs = retrieval
     assert len(all_docs) > 100
     assert all(doc.metadata.get("source") for doc in all_docs)
+    assert all(doc.metadata.get("chunk_id") for doc in all_docs)
+    assert all("section_path" in doc.metadata for doc in all_docs)
+    assert len({doc.metadata["chunk_id"] for doc in all_docs}) == len(all_docs)
 
 
 def test_hybrid_search_returns_at_most_k(retrieval):

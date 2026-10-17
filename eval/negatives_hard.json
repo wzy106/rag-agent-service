@@ -1,0 +1,25 @@
+{
+  "description": "Near-domain but unanswerable questions. Used to expose the gap between 'off-topic rejection' and 'in-domain but missing knowledge'.",
+  "questions": [
+    "DeepSeek V5 什么时候发布？",
+    "LangChain 2.0 有哪些破坏性变更？",
+    "LangGraph 2.0 的 interrupt 机制怎么用？",
+    "MCP 2027 规范新增了哪些能力？",
+    "FastAPI 4.0 的路线图是什么？",
+    "Python 3.15 什么时候发布？",
+    "PyTorch 3.0 对 NPU 的支持怎么样？",
+    "MySQL 9.0 的默认字符集是什么？",
+    "Redis 8.0 的集群模式怎么配置？",
+    "Docker 27 的默认存储驱动是什么？",
+    "Kubernetes 1.35 有哪些弃用 API？",
+    "Vue 4 什么时候发布？",
+    "Next.js 16 的 App Router 有什么变化？",
+    "OpenAI o3 的上下文窗口有多大？",
+    "Claude Opus 4.7 的价格是多少？",
+    "BGE-M3 和 bge-small-zh-v1.5 在 MTEB 上的分数差多少？",
+    "FAISS IVF-PQ 的 nprobe 参数怎么调？",
+    "RAGAS 0.3 的 faithfulness 指标怎么实现？",
+    "Pydantic 3.0 的 breaking changes 有哪些？",
+    "uvicorn 1.0 什么时候支持 HTTP/3？"
+  ]
+}
