@@ -14,11 +14,19 @@ import sys
 from pathlib import Path
 
 # ===== HF 环境初始化（必须在 sentence_transformers 之前）=====
+def _safe_exists(path: Path) -> bool:
+    """Path.exists() can raise PermissionError for /root on CI runners."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _resolve_hf_home() -> str:
     if os.environ.get("HF_HOME"):
         return os.environ["HF_HOME"]
     container_default = Path("/root/.cache/huggingface")
-    if container_default.exists():
+    if _safe_exists(container_default):
         return str(container_default)
     return str(Path(__file__).resolve().parent.parent / "hf_cache")
 
